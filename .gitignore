@@ -1,0 +1,6 @@
+*.sh
+*/.ipynb_checkpoints/*
+*.pyc
+*.log
+*/.vscode/*
+*/apex*
