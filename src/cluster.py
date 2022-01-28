@@ -1,5 +1,4 @@
 # cluster from AttentionXML
-
 import os
 import tqdm
 import joblib
@@ -21,7 +20,7 @@ def build_tree_by_level(sparse_data_x, sparse_data_y, eps: float, max_leaf: int,
     sparse_y = mlb.fit_transform(sparse_labels)
     joblib.dump(mlb, groups_path+'mlb')
     print('Getting Labels Feature')
-    labels_f = normalize(csr_matrix(sparse_y.T) @ csc_matrix(sparse_x))
+    labels_f = normalize(sparse_y.T @ csc_matrix(sparse_x))
     print(F'Start Clustering {levels}')
     levels, q = [2**x for x in levels], None
     for i in range(len(levels)-1, -1, -1):
@@ -42,6 +41,8 @@ def build_tree_by_level(sparse_data_x, sparse_data_y, eps: float, max_leaf: int,
         else:
             print(F'Finish Clustering {len(labels_list)}')
         next_q = []
+        max_size = max([len(node_i) for node_i, _ in q])
+        print(f'Maxinum size of node is {max_size}')
         for node_i, node_f in q:
             if len(node_i) > max_leaf:
                 next_q += list(split_node(node_i, node_f, eps))
@@ -69,29 +70,50 @@ def split_node(labels_i: np.ndarray, labels_f: csr_matrix, eps: float):
 import argparse
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--dataset', type=str, required=False, default='eurlex4k')
+parser.add_argument('--dataset', type=str, required=False, default='AmazonTitles-670K')
 parser.add_argument('--tree', action='store_true')
-parser.add_argument('--id', type=str, required=False, default='0')
+parser.add_argument('--id', type=str, required=False, default='8192')
 
 args = parser.parse_args()
 
 if __name__ == '__main__':
     dataset = args.dataset
+    datapath = os.path.join('./data/', dataset)
+    
     if dataset == '670k':
-        mlb = build_tree_by_level('./data/Amazon-670K/train_v1.txt', 
-                                  './data/Amazon-670K/train_labels.txt',
-                                  1e-4, 100, [], './data/Amazon-670K/label_group'+args.id)
-        groups = np.load(f'./data/Amazon-670K/label_group{args.id}-last.npy', allow_pickle=True)
+        mlb = build_tree_by_level('../../Datasets/Amazon-670K/train_v1.txt', 
+                                  '../../Datasets/Amazon-670K/train_labels.txt',
+                                  1e-4, 100, [], '../../Datasets/Amazon-670K/label_group'+args.id)
+        groups = np.load(f'../../Datasets/Amazon-670K/label_group{args.id}-last.npy', allow_pickle=True)
         new_group = []
         for group in groups:
             new_group.append([mlb.classes_[i] for i in group])
-        np.save(f'./data/Amazon-670K/label_group{args.id}.npy', np.array(new_group))
+        np.save(f'../../Datasets/Amazon-670K/label_group{args.id}.npy', np.array(new_group))
+    
+
     elif dataset == '500k':
         mlb = build_tree_by_level('./data/Wiki-500K/train.txt', 
                                   './data/Wiki-500K/train_labels.txt',
-                                  1e-4, 100, [], './data/Wiki-500K/groups')
+                                  1e-4, 8, [11, 14, 17], './data/Wiki-500K/groups')
         groups = np.load(f'./data/Wiki-500K/groups-last{args.id}.npy', allow_pickle=True)
         new_group = []
         for group in groups:
             new_group.append([mlb.classes_[i] for i in group])
         np.save(f'./data/Wiki-500K/label_group{args.id}.npy', np.array(new_group))
+
+    elif dataset == 'WikiSeeAlsoTitles-350K' or dataset == 'AmazonTitles-670K':
+        final_name = f'label_group{args.id}'
+        final_name = os.path.join(datapath, final_name)
+        
+        train_file = os.path.join(datapath, 'bow-train.txt')
+        labels_file = os.path.join(datapath, 'bow-labels.txt')
+        
+        # mlb = build_tree_by_level(train_file, labels_file, 1e-4, 120, [], f'{final_name}') #4K
+        mlb = build_tree_by_level(train_file, labels_file, 1e-4, 85, [], f'{final_name}') #8K
+        # mlb = build_tree_by_level(train_file, labels_file, 1e-4, 30, [], f'{final_name}') #16K
+
+        groups = np.load(f'{final_name}-last.npy', allow_pickle=True)
+        new_group = []
+        for group in groups:
+            new_group.append([mlb.classes_[i] for i in group])
+        np.save(f'{final_name}.npy', np.array(new_group))

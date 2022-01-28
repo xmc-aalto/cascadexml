@@ -33,120 +33,175 @@ def get_bert(bert_name):
     return bert
 
 class LightXML(nn.Module):
-    def __init__(self, n_labels, group_y=None, bert='bert-base', feature_layers=5, dropout=0.5, update_count=1,
-                 candidates_topk=10, 
-                 use_swa=True, swa_warmup_epoch=10, swa_update_step=200, hidden_dim=300):
+    def __init__(self, params, group_y=None, feature_layers=5, dropout=0.5):
         super(LightXML, self).__init__()
 
-        self.use_swa = use_swa
-        self.swa_warmup_epoch = swa_warmup_epoch
-        self.swa_update_step = swa_update_step
+        self.use_swa = params.swa
+        self.swa_warmup_epoch = params.swa_warmup
+        self.swa_update_step = params.swa_step
         self.swa_state = {}
-
-        self.update_count = update_count
-
-        self.candidates_topk = candidates_topk
+        self.update_count = params.update_count
+        self.mode = mode
 
         print('swa', self.use_swa, self.swa_warmup_epoch, self.swa_update_step, self.swa_state)
         print('update_count', self.update_count)
 
-        self.bert_name, self.bert = bert, get_bert(bert)
+        self.loss_fn = torch.nn.BCEWithLogitsLoss()
+        self.candidates_topk = params.topk
+
+        self.bert_name, self.bert = params.bert, get_bert(params.bert)
         self.feature_layers, self.drop_out = feature_layers, nn.Dropout(dropout)
 
+        # self.meta_hidden = spectral_norm(nn.Linear(hidden_dims, hidden_dims))
+        # self.ext_hidden = spectral_norm(nn.Linear(hidden_dims, hidden_dims))
         self.group_y = group_y
+        
         if self.group_y is not None:
-            self.group_y_labels = group_y.shape[0]
-            print('hidden dim:',  hidden_dim)
-            print('label goup numbers:',  self.group_y_labels)
+            if params.dataset == 'amazon670k':
+                max_group = {8192:82, 16384:41, 32768:21, 65536:11}
+            elif params.dataset == 'amazon3M':
+                max_group = {131072:22}
+            elif params.dataset == 'wiki500k':
+                max_group = {65536:8}
 
-            self.l0 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, self.group_y_labels)
+            num_clusters = group_y.shape[0]
+            for i in range(num_clusters):
+                if len(group_y[i]) < max_group[num_clusters]:
+                    # group_y[i] = np.pad(group_y[i], (0, 1), constant_values=self.num_labels).astype(np.int32)
+                    group_y[i] = np.pad(group_y[i], (0, 1), mode="edge").astype(np.int32)
+                else:
+                    group_y[i] = np.array(group_y[i]).astype(np.int32)
+            group_y = np.stack(group_y)
+            self.group_y = torch.LongTensor(group_y).cuda()
+
+            num_meta_labels = group_y.shape[0] if group_y is not None else self.num_labels
+            print(f'Number of Meta-labels: {num_meta_labels}; top_k: {self.candidates_topk}')#; meta-epochs: {self.meta_epoch}')
+
+            # self.meta_classifiers = nn.Linear(hidden_dims, num_meta_labels)
+            # self.ext_classif_embed = nn.Embedding(self.num_labels, hidden_dims)#, padding_idx=self.num_labels)
+
+            print('hidden dim:',  params.hidden_dim)
+            print('label goup numbers:',  num_clusters)
+
+            self.l0 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, num_clusters)
             # hidden bottle layer
-            self.l1 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, hidden_dim)
-            self.embed = nn.Embedding(n_labels, hidden_dim)
+            self.l1 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, params.hidden_dim)
+            self.embed = nn.Embedding(params.num_labels, params.hidden_dim)
             nn.init.xavier_uniform_(self.embed.weight)
         else:
-            self.l0 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, n_labels)
+            self.l0 = nn.Linear(self.feature_layers*self.bert.config.hidden_size, params.num_labels)
+
+    # def get_candidates(self, group_logits, group_gd=None):
+    #     logits = torch.sigmoid(group_logits.detach())
+    #     if group_gd is not None:
+    #         logits += group_gd
+    #     scores, indices = torch.topk(logits, k=self.candidates_topk)
+    #     scores, indices = scores.cpu().detach().numpy(), indices.cpu().detach().numpy()
+    #     candidates, candidates_scores = [], []
+    #     for index, score in zip(indices, scores):
+    #         candidates.append(self.group_y[index])
+    #         candidates_scores.append([np.full(c.shape, s) for c, s in zip(candidates[-1], score)])
+    #         candidates[-1] = np.concatenate(candidates[-1])
+    #         candidates_scores[-1] = np.concatenate(candidates_scores[-1])
+    #     max_candidates = max([i.shape[0] for i in candidates])
+    #     candidates = np.stack([np.pad(i, (0, max_candidates - i.shape[0]), mode='edge') for i in candidates])
+    #     candidates_scores = np.stack([np.pad(i, (0, max_candidates - i.shape[0]), mode='edge') for i in candidates_scores])
+    #     return indices, candidates, candidates_scores
 
     def get_candidates(self, group_logits, group_gd=None):
-        logits = torch.sigmoid(group_logits.detach())
+        group_logits = torch.sigmoid(group_logits.detach())
+        TF_logits = group_logits.clone()
         if group_gd is not None:
-            logits += group_gd
-        scores, indices = torch.topk(logits, k=self.candidates_topk)
-        scores, indices = scores.cpu().detach().numpy(), indices.cpu().detach().numpy()
-        candidates, candidates_scores = [], []
-        for index, score in zip(indices, scores):
-            candidates.append(self.group_y[index])
-            candidates_scores.append([np.full(c.shape, s) for c, s in zip(candidates[-1], score)])
-            candidates[-1] = np.concatenate(candidates[-1])
-            candidates_scores[-1] = np.concatenate(candidates_scores[-1])
-        max_candidates = max([i.shape[0] for i in candidates])
-        candidates = np.stack([np.pad(i, (0, max_candidates - i.shape[0]), mode='edge') for i in candidates])
-        candidates_scores = np.stack([np.pad(i, (0, max_candidates - i.shape[0]), mode='edge') for i in candidates_scores])
-        return indices, candidates, candidates_scores
+            TF_logits += group_gd
+        scores, indices = torch.topk(TF_logits, k=self.candidates_topk)
+        if self.is_training:
+            scores = group_logits[torch.arange(group_logits.shape[0]).view(-1,1).cuda(), indices]
+        candidates = self.group_y[indices] 
+        candidates_scores = torch.ones_like(candidates) * scores[...,None] 
+        
+        return indices, candidates.flatten(1), candidates_scores.flatten(1)
 
-    def forward(self, input_ids, attention_mask, token_type_ids,
-                labels=None, group_labels=None, candidates=None):
-        is_training = labels is not None
+    def forward(self, input_ids, attention_mask, token_type_ids, extreme_labels=None, group_labels=None):
+        self.is_training = extreme_labels is not None
 
-        outs = self.bert(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids
-        )[-1]
+        outs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)[-1]
 
+        # takes first word embedding of each hidden state
         out = torch.cat([outs[-i][:, 0] for i in range(1, self.feature_layers+1)], dim=-1)
         out = self.drop_out(out)
-        group_logits = self.l0(out)
+        meta_logits = self.l0(out)
+
         if self.group_y is None:
-            logits = group_logits
-            if is_training:
-                loss_fn = torch.nn.BCEWithLogitsLoss()
-                loss = loss_fn(logits, labels)
+            logits = meta_logits
+            if self.is_training:
+                loss = self.loss_fn(logits, extreme_labels)
                 return logits, loss
             else:
                 return logits
 
-        if is_training:
-            l = labels.to(dtype=torch.bool)
-            target_candidates = torch.masked_select(candidates, l).detach().cpu()
-            target_candidates_num = l.sum(dim=1).detach().cpu()
-        groups, candidates, group_candidates_scores = self.get_candidates(group_logits,
-                                                                          group_gd=group_labels if is_training else None)
-        if is_training:
-            bs = 0
+        # if is_training:
+        #     # labels = candidates
+        #     l = labels.to(dtype=torch.bool)
+        #     target_candidates = torch.masked_select(candidates, l).detach().cpu()
+        #     target_candidates_num = l.sum(dim=1).detach().cpu()
+        #     # target_candidates_num = torch.cat([torch.tensor([0]),l.sum(dim=1).detach().cpu().cumsum(dim=0)])
+        #     # tc = []
+        #     # for i in range(1,len(target_candidates_num)):
+        #     #     tc.append(target_candidates[target_candidates_num[i-1]:target_candidates_num[i]])
+        # groups, candidates, group_candidates_scores = self.get_candidates(group_logits, is_training,
+        #                                                                   group_gd=group_labels if is_training else None)
+
+        # if is_training:
+        #     bs = 0
+        #     new_labels = []
+        #     for i, n in enumerate(target_candidates_num.numpy()):
+        #         be = bs + n
+        #         c = set(target_candidates[bs: be].numpy())
+        #         c2 = candidates[i]
+        #         new_labels.append(torch.tensor([1.0 if i in c else 0.0 for i in c2 ]))
+        #         if len(c) != new_labels[-1].sum():
+        #             s_c2 = set(c2)
+        #             for cc in list(c):
+        #                 if cc in s_c2:
+        #                     continue
+        #                 for j in range(new_labels[-1].shape[0]):
+        #                     if new_labels[-1][j].item() != 1:
+        #                         c2[j] = cc
+        #                         new_labels[-1][j] = 1.0
+        #                         break
+        #         bs = be
+        #     labels = torch.stack(new_labels).cuda()
+        # candidates, group_candidates_scores =  torch.LongTensor(candidates).cuda(), torch.Tensor(group_candidates_scores).cuda()
+        
+        groups, candidates, group_candidates_scores = self.get_candidates(meta_logits, group_gd=group_labels)
+
+        if self.is_training:
             new_labels = []
-            for i, n in enumerate(target_candidates_num.numpy()):
-                be = bs + n
-                c = set(target_candidates[bs: be].numpy())
-                c2 = candidates[i]
-                new_labels.append(torch.tensor([1.0 if i in c else 0.0 for i in c2 ]))
-                if len(c) != new_labels[-1].sum():
-                    s_c2 = set(c2)
-                    for cc in list(c):
-                        if cc in s_c2:
-                            continue
-                        for j in range(new_labels[-1].shape[0]):
-                            if new_labels[-1][j].item() != 1:
-                                c2[j] = cc
-                                new_labels[-1][j] = 1.0
-                                break
-                bs = be
+            for i, ext in enumerate(extreme_labels):
+                ext = ext.cuda()
+                new_lab = (candidates[i][..., None] == ext).any(-1).float()
+                if new_lab.sum() < ext.shape[0]:
+                    not_p = (ext[..., None] == candidates[i]).any(-1)
+                    ext_p = ext[not_p == False]
+                    candidates[i][-ext_p.shape[0]:] = ext_p
+                    new_lab[-ext_p.shape[0]:] = 1.0
+                    
+                new_labels.append(new_lab)
             labels = torch.stack(new_labels).cuda()
-        candidates, group_candidates_scores =  torch.LongTensor(candidates).cuda(), torch.Tensor(group_candidates_scores).cuda()
 
         emb = self.l1(out)
         embed_weights = self.embed(candidates) # N, sampled_size, H
         emb = emb.unsqueeze(-1)
         logits = torch.bmm(embed_weights, emb).squeeze(-1)
 
-        if is_training:
+        if self.is_training:
             loss_fn = torch.nn.BCEWithLogitsLoss()
-            loss = loss_fn(logits, labels) + loss_fn(group_logits, group_labels)
+            loss = loss_fn(logits, labels) + loss_fn(meta_logits, group_labels)
             return logits, loss
         else:
             candidates_scores = torch.sigmoid(logits)
             candidates_scores = candidates_scores * group_candidates_scores
-            return group_logits, candidates, candidates_scores
+            return meta_logits, candidates, candidates_scores
 
     def save_model(self, path):
         self.swa_swap_params()
@@ -174,29 +229,6 @@ class LightXML(nn.Module):
             self.swa_state[n], p.data =  self.swa_state[n].cpu(), p.data.cpu()
             self.swa_state[n], p.data =  p.data.cpu(), self.swa_state[n].cuda()
 
-    def get_fast_tokenizer(self):
-        if 'roberta' in self.bert_name:
-            tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base', do_lower_case=True)
-        elif 'xlnet' in self.bert_name:
-            tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased') 
-        else:
-            tokenizer = BertWordPieceTokenizer(
-                "data/.bert-base-uncased-vocab.txt",
-                lowercase=True)
-        return tokenizer
-
-    def get_tokenizer(self):
-        if 'roberta' in self.bert_name:
-            print('load roberta-base tokenizer')
-            tokenizer = RobertaTokenizer.from_pretrained('roberta-base', do_lower_case=True)
-        elif 'xlnet' in self.bert_name:
-            print('load xlnet-base-cased tokenizer')
-            tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased')
-        else:
-            print('load bert-base-uncased tokenizer')
-            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
-        return tokenizer
-
     def get_accuracy(self, candidates, logits, labels):
         if candidates is not None:
             candidates = candidates.detach().cpu()
@@ -217,9 +249,9 @@ class LightXML(nn.Module):
             total += 1
 
         return total, acc1, acc3, acc5
-
-    def one_epoch(self, epoch, dataloader, optimizer,
-                  mode='train', eval_loader=None, eval_step=20000, log=None):
+    
+    def one_epoch(self, epoch, dataloader, optimizer, mode='train', 
+                    eval_loader=None, eval_step=20000, log=None):
 
         bar = tqdm.tqdm(total=len(dataloader))
         p1, p3, p5 = 0, 0, 0
@@ -243,17 +275,16 @@ class LightXML(nn.Module):
         bar.set_description(f'{mode}-{epoch}')
 
         with torch.set_grad_enabled(mode == 'train'):
-            for step, data in enumerate(dataloader):
-                batch = tuple(t for t in data)
-                have_group = len(batch) > 4
+            for step, batch in enumerate(dataloader):
                 inputs = {'input_ids':      batch[0].cuda(),
                           'attention_mask': batch[1].cuda(),
-                          'token_type_ids': batch[2].cuda()}
+                          'token_type_ids': torch.zeros_like(batch[1]).cuda()}
                 if mode == 'train':
-                    inputs['labels'] = batch[3].cuda()
-                    if self.group_y is not None:
-                        inputs['group_labels'] = batch[4].cuda()
-                        inputs['candidates'] = batch[5].cuda()
+                    if len(batch) == 3:
+                        inputs['extreme_labels'] = batch[2].cuda()
+                    elif len(batch) == 4:
+                        inputs['extreme_labels'] = batch[2]
+                        inputs['group_labels'] = batch[3].cuda()
 
                 outputs = self(**inputs)
 
@@ -292,7 +323,8 @@ class LightXML(nn.Module):
                 elif self.group_y is None:
                     logits = outputs
                     if mode == 'eval':
-                        labels = batch[3]
+                        labels = batch[2]
+                        labels = torch.tensor(labels)
                         _total, _acc1, _acc3, _acc5 =  self.get_accuracy(None, logits, labels.cpu().numpy())
                         total += _total; acc1 += _acc1; acc3 += _acc3; acc5 += _acc5
                         p1 = acc1 / total
@@ -305,9 +337,10 @@ class LightXML(nn.Module):
                     group_logits, candidates, logits = outputs
 
                     if mode == 'eval':
-                        labels = batch[3]
-                        group_labels = batch[4]
-
+                        labels = batch[2]
+                        group_labels = batch[3]
+                        labels = torch.tensor(labels)
+                        group_labels = group_labels if not torch.is_tensor(group_labels) else torch.tensor(group_labels)
                         _total, _acc1, _acc3, _acc5 = self.get_accuracy(candidates, logits, labels.cpu().numpy())
                         total += _total; acc1 += _acc1; acc3 += _acc3; acc5 += _acc5
                         p1 = acc1 / total

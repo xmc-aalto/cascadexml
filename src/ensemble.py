@@ -17,7 +17,8 @@ if __name__ == '__main__':
 
     xmc_models = []
     predicts = []
-    berts = ['bert-base', 'roberta', 'xlnet']
+    # berts = ['bert-base', 'roberta', 'xlnet']
+    berts = ['bert-base']
 
     for index in range(len(berts)):
         model_name = [args.dataset, '' if berts[index] == 'bert-base' else berts[index]]
