@@ -61,7 +61,11 @@ def load_data(dataset, model):
                 'wiki500k': 'Wiki-500K',
                 'amazoncat13k': 'AmazonCat-13K',
                 'amazon670k': 'Amazon-670K',
-                'eurlex4k': 'Eurlex-4K'}
+                'eurlex4k': 'Eurlex-4K',
+                'AT670': 'AmazonTitles-670K',
+                'WT500': 'WikiTitles-500K',
+                'WSAT350': 'WikiSeeAlsoTitles-350K',
+                }
     
     assert dataset in name_map
     dataset = name_map[dataset]
@@ -89,11 +93,11 @@ def load_data(dataset, model):
         test_texts = pkl.load(f)
 
     with open(f'./data/{dataset}/train_labels.txt') as f:
-        for lab in tqdm.tqdm(f):
+        for lab in f:
             train_labels.append(lab.replace('\n', '').split())
 
     with open(f'./data/{dataset}/test_labels.txt') as f:
-        for lab in tqdm.tqdm(f):
+        for lab in f:
             test_labels.append(lab.replace('\n', '').split())
 
     return train_texts, test_texts, train_labels, test_labels
@@ -102,10 +106,16 @@ def load_group(dataset, num_clusters):
     if dataset == 'wiki500k':
         return np.load(f'./data/Wiki-500K/label_group_{num_clusters}.npy', allow_pickle=True)
     if dataset == 'amazon670k':
-        return np.load(f'./data/Amazon-670K/label_group_{num_clusters}.npy', allow_pickle=True)
+        return np.load(f'./data/Amazon-670K/label_group_{num_clusters}.npy', allow_pickle=True) 
+        # return np.load(f'./data/Amazon-670K/label_group_tree-Level-1.npy', allow_pickle=True)
     if dataset == 'AT670':
-        return np.load(f'./data/AmazonTitles-670K/label_group_{num_clusters}.npy', allow_pickle=True)
+        # return np.load(f'./data/AmazonTitles-670K/label_group_{num_clusters}.npy', allow_pickle=True)
+        return np.load(f'./data/AmazonTitles-670K/label_group8192.npy', allow_pickle=True)
     if dataset == 'WSAT':
         return np.load(f'./data/WikiSeeAlsoTitles-350K/label_group_{num_clusters}.npy', allow_pickle=True)  
     if dataset == 'WT500':
         return np.load(f'./data/WikiTitles-500K/label_group_{num_clusters}.npy', allow_pickle=True)            
+
+def load_cluster_tree(dataset):
+    if dataset == 'amazon670k':
+        return [np.load(f'./data/Amazon-670K/label_group_tree-Level-{i}.npy', allow_pickle=True) for i in range(2)]

@@ -1,58 +1,25 @@
-import sys
 import os
 import random
 import numpy as np
-from apex import amp
 from model import LightXML
+from detached_model import Detached_LightXML
+from LightIncept import LightIncXML
 from torch.utils.data import DataLoader
 from transformers import AdamW
 import torch
-from torch.utils.data import DataLoader
-from dataset import XMLData
-from data_utils import load_data, load_group
-from log import Logger
+from dataset import XMLData, MultiXMLData
+from data_utils import load_data, load_group, load_cluster_tree
+from Runner_Plus import Runner as LightXMLRunner
+from Runner_detached import Runner as DetachedRunner
 
-NUM_LABELS = {'amazon670k': 670091, 'amazon3M': 2812281, 'wiki500K' : 501070, 'amazoncat13K': 13330, 'wiki31k': 30938, 'eurlex': 3993}
-NUM_CLUSTERS = {'amazon670k': 8192, 'amazon3M': 131072, 'wiki500K' : 65536, 'amazoncat13K': 128, 'wiki31k': 256, 'eurlex': 64}
-
-def train(model, train_dl, test_dl, group_y = None):
-    
-    model.cuda()
-    no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=params.lr)
-    
-    model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
-
-    max_only_p5 = 0
-    
-    for epoch in range(params.epoch+5):
-        train_loss = model.one_epoch(epoch, train_dl, optimizer, mode='train',
-                                     eval_loader=test_dl, eval_step=params.eval_step, log=LOG)
-
-        if epoch >= 20: #skip
-            ev_result = model.one_epoch(epoch, test_dl, optimizer, mode='eval')
-            g_p1, g_p3, g_p5, p1, p3, p5 = ev_result
-            log_str = f'{epoch:>2}: {p1:.4f}, {p3:.4f}, {p5:.4f}, train_loss:{train_loss}'
-            if params.dataset in ['wiki500k', 'amazon670k', 'AT670', 'WSAT', 'WT500']:
-                log_str += f' {g_p1:.4f}, {g_p3:.4f}, {g_p5:.4f}'
-            LOG.log(log_str)
-
-            if max_only_p5 < p5:
-                max_only_p5 = p5
-                model.save_model(f'models/model-{get_exp_name()}.bin')
-
-            if epoch >= params.epoch + 5 and max_only_p5 != p5:
-                break
+NUM_LABELS = {'amazon670k': 670091, 'amazon3M': 2812281, 'wiki500K' : 501070, 'amazoncat13K': 13330, 'wiki31k': 30938, 'eurlex': 3993, 'AT670': 670091, 'WT500': 501070, 'WSAT350': 352072}
+NUM_CLUSTERS = {'amazon670k': 8192, 'amazon3M': 131072, 'wiki500K' : 65536, 'amazoncat13K': 128, 'wiki31k': 256, 'eurlex': 64, 'AT670': 8192, 'WT500':8192, 'WSAT350': 8192}
 
 
 def get_exp_name():
-    name = [params.dataset, '' if params.bert == 'bert-base' else params.bert]
+    name = [params.dataset, params.mn, '' if params.bert == 'bert-base' else params.bert]
     if params.dataset in ['wiki500k', 'amazon670k', 'WSAT', 'WT500']:
-        name.append('t'+str(params.group_y))
+        name.append('t'+str(params.tree_id))
 
     return '_'.join([i for i in name if i != ''])
 
@@ -63,6 +30,16 @@ def collate_func(batch):
             b = torch.stack(b)
         collated.append(b)
     return collated
+
+def multi_collate(batch):
+    batch = list(zip(*batch))
+    input_ids = torch.stack(batch[0])
+    attention_mask = torch.stack(batch[1])
+    cluster_binarized = torch.stack(batch[2])
+    cluster_ids_1 = batch[3]
+    labels = batch[4]
+
+    return input_ids, attention_mask, (cluster_binarized, cluster_ids_1, labels)
 
 def init_seed(seed):
     random.seed(seed)
@@ -80,23 +57,29 @@ parser.add_argument('--update_count', type=int, required=False, default=1)
 parser.add_argument('--lr', type=float, required=False, default=1e-4)
 parser.add_argument('--seed', type=int, required=False, default=29)
 
-parser.add_argument('--epoch', type=int, required=False, default=20)
+parser.add_argument('--mn', type=str, required=True)
+parser.add_argument('--lm', dest='load_model', type=str, default="", help='model to load')
+parser.add_argument('--test', action='store_true', help='Testing mode or training mode')
+
+parser.add_argument('--num_epochs', type=int, required=False, default=20)
 parser.add_argument('--dataset', type=str, required=False, default='eurlex4k')
 parser.add_argument('--bert', type=str, required=False, default='bert-base')
 parser.add_argument('--max_len', type=int, required=False, default=512)
 
-parser.add_argument('--valid', action='store_true')
-
 parser.add_argument('--swa', action='store_true')
-parser.add_argument('--swa_warmup', type=int, required=False, default=10)
-parser.add_argument('--swa_step', type=int, required=False, default=100)
+parser.add_argument('--swa_warmup', type=int, required=False, default=30)
+parser.add_argument('--swa_step', type=int, required=False, default=3000)
 
-parser.add_argument('--group_y', type=int, default=0)
-parser.add_argument('--topk', type=int, required=False, default=10)
+parser.add_argument('--tree_id', type=int, default=0)
+parser.add_argument('--topk', required=False, type=int, default=10, nargs='+')
 
 parser.add_argument('--eval_step', type=int, required=False, default=20000)
 parser.add_argument('--hidden_dim', type=int, required=False, default=300)
-parser.add_argument('--eval_model', action='store_true')
+parser.add_argument('--load_model', type=str, default='', required=False)
+
+parser.add_argument('--use_detach', action='store_true')
+parser.add_argument('--use_incept', action='store_true')
+parser.add_argument('--adahess', action='store_true')
 
 params = parser.parse_args()
 
@@ -104,35 +87,57 @@ if __name__ == '__main__':
     init_seed(params.seed)
     
     print(get_exp_name())
-    LOG = Logger('log_'+get_exp_name())
     print(f'load {params.dataset} dataset...')
     
     params.num_labels = NUM_LABELS[params.dataset]
     params.num_clusters = NUM_CLUSTERS[params.dataset]
+    params.model_name = get_exp_name()
+
+    if not os.path.exists(params.model_name):
+        os.makedirs(params.model_name)
+    
+    if len(params.load_model):
+        params.load_model = os.path.join(params.model_name, params.load_model)
 
     X_train, X_test, Y_train, Y_test = load_data(params.dataset, params.bert)
     
-    group_y = load_group(params.dataset, params.num_clusters) if params.dataset in ['wiki500k', 'amazon670k'] else None
-    collate_fn = collate_func if params.dataset in ['wiki500k', 'amazon670k'] else None
+    if not params.use_detach:
+        group_y = load_group(params.dataset, params.num_clusters) if params.dataset in ['wiki500k', 'amazon670k', 'AT670'] else None
+        collate_fn = collate_func if params.dataset in ['wiki500k', 'amazon670k', 'AT670'] else None
 
-    train_dataset = XMLData(X_train, Y_train, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='train')
-    test_dataset = XMLData(X_test, Y_test, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='train')
-    train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, shuffle=True, collate_fn=collate_fn, pin_memory=True)
-    test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, shuffle=False, collate_fn=collate_fn, pin_memory=True)
+        train_dataset = XMLData(X_train, Y_train, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='train')
+        test_dataset = XMLData(X_test, Y_test, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='test')
+        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, shuffle=True, collate_fn=collate_fn, pin_memory=True)
+        test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, shuffle=False, collate_fn=collate_fn, pin_memory=True)
 
-    if params.dataset in ['wiki500k', 'amazon670k']:
-        model = LightXML(params = params, group_y=group_y)
+        if params.use_incept:
+            if params.dataset in ['wiki500k', 'amazon670k']:
+                model = LightIncXML(params = params, group_y=group_y)
+            else:
+                model = LightIncXML(params = params)
+        
+        else:
+            if params.dataset in ['wiki500k', 'amazon670k', 'AT670']:
+                model = LightXML(params = params, group_y=group_y)
+            else:
+                model = LightXML(params = params)            
+        
+        runner = LightXMLRunner(params, train_dl, test_dl)
+        runner.train(model, params)
+    
     else:
-        model = LightXML(params = params)
+        clusters = load_cluster_tree(params.dataset) if params.dataset in ['wiki500k', 'amazon670k'] else None
+        collate_fn = multi_collate
 
-    if params.eval_model and params.dataset in ['wiki500k', 'amazon670k']:
-        print(f'load models/model-{get_exp_name()}.bin')
-        model.load_state_dict(torch.load(f'models/model-{get_exp_name()}.bin'))
-        model = model.cuda()
+        train_dataset = MultiXMLData(X_train, Y_train, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='train')
+        test_dataset = MultiXMLData(X_test, Y_test, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='test')
+        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=0, shuffle=True, collate_fn=collate_fn, pin_memory=True)
+        test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=0, shuffle=False, collate_fn=collate_fn, pin_memory=True)
 
-        pred_scores, pred_labels = model.one_epoch(0, test_dl, None, mode='test')
-        np.save(f'results/{get_exp_name()}-labels.npy', np.array(pred_labels))
-        np.save(f'results/{get_exp_name()}-scores.npy', np.array(pred_scores))
-        sys.exit(0)
-
-    train(model, train_dl, test_dl, group_y)
+        if params.dataset in ['wiki500k', 'amazon670k']:
+            model = Detached_LightXML(params = params, train_ds = train_dataset)
+        else:
+            model = Detached_LightXML(params = params)
+        
+        runner = DetachedRunner(params, train_dl, test_dl)
+        runner.train(model, params)
