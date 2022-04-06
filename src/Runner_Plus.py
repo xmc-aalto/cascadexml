@@ -165,9 +165,9 @@ class Runner:
             return
 
         # self.cycle_scheduler = optim.lr_scheduler.OneCycleLR(
-        #     optimizer=self.optimizer, max_lr=(params.batch_size/128)*params.lr,
-        #     epochs=params.num_epochs, steps_per_epoch=steps_per_epoch, pct_start=0.33,
-        #     div_factor=10, final_div_factor=1e4, last_epoch=last_batch)
+        #     optimizer=self.optimizer, max_lr=lr, epochs=params.num_epochs, 
+        #     steps_per_epoch=steps_per_epoch, pct_start=0.6,
+        #     div_factor=20, final_div_factor=100, last_epoch=last_batch)
 
         for epoch in range(init, params.num_epochs):
             self.fit_one_epoch(model, params, epoch+1)

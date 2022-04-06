@@ -136,7 +136,7 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--dataset', type=str, required=False, default='670k')
 parser.add_argument('--tree', action='store_true')
-parser.add_argument('--id', type=str, required=False, default='_kuch')
+parser.add_argument('--id', type=str, required=False, default='_stable')
 
 args = parser.parse_args()
 
@@ -147,7 +147,7 @@ if __name__ == '__main__':
     if dataset == '670k':
         mlb = build_tree_by_level('../data/Amazon-670K/train_v1.txt', 
                                   '../data/Amazon-670K/train_labels.txt',
-                                  eps=1e-4, max_leaf=1, levels=[12, 15, 16], groups_path='../data/Amazon-670K/label_group'+args.id)
+                                  eps=1e-4, max_leaf=1, levels=[7, 11, 15], groups_path='../data/Amazon-670K/label_group'+args.id)
         groups = np.load(f'../data/Amazon-670K/label_group{args.id}-last.npy', allow_pickle=True)
         new_group = []
         for group in groups:

@@ -40,9 +40,7 @@ class LightXML(nn.Module):
         self.use_swa = params.swa
         self.swa_update_step = params.swa_step
         self.swa_warmup_epoch = params.swa_warmup
-        self.update_count = params.update_count
         print('swa', self.use_swa, self.swa_warmup_epoch, self.swa_update_step, self.swa_state)
-        print('update_count', self.update_count)
 
         self.loss_fn = torch.nn.BCEWithLogitsLoss()
         self.candidates_topk = params.topk[0]
