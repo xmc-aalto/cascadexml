@@ -1,9 +1,9 @@
 import os
 import random
 import numpy as np
-from model import LightXML
-from detached_model import Detached_LightXML
-from LightIncept import LightIncXML
+from LightXML import LightXML
+# from detached_model import Detached_LightXML
+# from LightIncept import LightIncXML
 from torch.utils.data import DataLoader
 from transformers import AdamW
 import torch
@@ -14,16 +14,16 @@ import torch.nn as nn
 from dataset import *
 from data_utils import load_data, load_group, load_cluster_tree
 from Runner_Plus import Runner as LightXMLRunner
-from Runner_detached import Runner as DetachedRunner
+# from Runner_detached import Runner as DetachedRunner
 from dist_eval_sampler import DistributedEvalSampler
 
-NUM_LABELS = {'Amazon-670K': 670091, 'amazon3M': 2812281, 'wiki500K' : 501070, 'amazoncat13K': 13330, 'wiki31k': 30938, 'eurlex': 3993, 'AT670': 670091, 'WT500': 501070, 'WSAT350': 352072}
-NUM_CLUSTERS = {'Amazon-670K': 8192, 'amazon3M': 131072, 'wiki500K' : 65536, 'amazoncat13K': 128, 'wiki31k': 256, 'eurlex': 64, 'AT670': 8192, 'WT500':8192, 'WSAT350': 8192}
-
+NUM_LABELS = {'AT131': 131073, 'amazon670k': 670091, 'amazon3M': 2812281, 'wiki500K' : 501070, 'amazoncat13K': 13330, 'wiki31k': 30938, 'eurlex': 3993, 'AT670': 670091, 'WT500': 501070, 'WSAT350': 352072}
+NUM_CLUSTERS = {'AT131': 8192, 'amazon670k': 8192, 'amazon3M': 131072, 'wiki500K' : 65536, 'amazoncat13K': 128, 'wiki31k': 256, 'eurlex': 64, 'AT670': 8192, 'WT500':8192, 'WSAT350': 8192}
+NAME_MAP = {'amazon670k': 'Amazon-670K', 'AT131': 'LF-AmazonTitles-131K'}
 
 def get_exp_name():
     name = [params.dataset, params.mn, '' if params.bert == 'bert-base' else params.bert]
-    if params.dataset in ['wiki500k', 'Amazon-670K', 'WSAT', 'WT500']:
+    if params.dataset in ['wiki500k', 'amazon670k', 'WSAT', 'WT500', 'AT131']:
         name.append('t'+str(params.tree_id))
 
     return '_'.join([i for i in name if i != ''])
@@ -161,27 +161,27 @@ if __name__ == '__main__':
     if len(params.load_model):
         params.load_model = os.path.join(params.model_name, params.load_model)
 
-    params.data_path = os.path.join('./data/', params.dataset)
+    params.data_path = os.path.join('../Datasets/', NAME_MAP[params.dataset])
 
-    X_train, X_test, Y_train, Y_test, X_tfidf = load_data(params.data_path, params.bert, params.num_labels)
+    X_train, X_test, lbl, Y_train, Y_test, X_tfidf, inv_prop = load_data(params.data_path, params.bert, params.num_labels, None)
     
     if not params.use_detach:
-        group_y = load_group(params.dataset, params.num_clusters) if params.dataset in ['wiki500k', 'Amazon-670K', 'AT670'] else None
-        collate_fn = collate_func if params.dataset in ['wiki500k', 'Amazon-670K', 'AT670'] else None
+        group_y = load_group(NAME_MAP[params.dataset], params.num_clusters) if params.dataset in ['wiki500k', 'amazon670k','AT131', 'AT670'] else None
+        collate_fn = collate_func if params.dataset in ['wiki500k', 'AT131', 'amazon670k', 'AT670'] else None
 
-        train_dataset = XMLData(X_train, Y_train, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='train')
-        test_dataset = XMLData(X_test, Y_test, params.num_labels, params.max_len, group_y, model_name = params.bert, mode='test')
-        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, shuffle=True, collate_fn=collate_fn, pin_memory=True)
-        test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, shuffle=False, collate_fn=collate_fn, pin_memory=True)
+        train_dataset = XMLData(X_train, Y_train, params.num_labels, params.max_len, params, group_y, model_name = params.bert, mode='train')
+        test_dataset = XMLData(X_test, Y_test, params.num_labels, params.max_len, params, group_y, model_name = params.bert, mode='test')
+        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=0, shuffle=True, collate_fn=collate_fn, pin_memory=True)
+        test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=0, shuffle=False, collate_fn=collate_fn, pin_memory=True)
 
         if params.use_incept:
-            if params.dataset in ['wiki500k', 'Amazon-670K']:
+            if params.dataset in ['wiki500k', 'amazon670k']:
                 model = LightIncXML(params = params, group_y=group_y)
             else:
                 model = LightIncXML(params = params)
         
         else:
-            if params.dataset in ['wiki500k', 'Amazon-670K', 'AT670']:
+            if params.dataset in ['wiki500k', 'AT131', 'amazon670k', 'AT670']:
                 model = LightXML(params = params, group_y=group_y)
             else:
                 model = LightXML(params = params)            
@@ -192,7 +192,7 @@ if __name__ == '__main__':
     else:
         collate_fn = multi_collate
         
-        # clusters = load_cluster_tree(params.dataset) if params.dataset in ['wiki500k', 'Amazon-670K'] else None
+        # clusters = load_cluster_tree(params.dataset) if params.dataset in ['wiki500k', 'amazon670k'] else None
         # train_dataset = MultiXMLData(X_train, Y_train, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='train')
         # test_dataset = MultiXMLData(X_test, Y_test, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='test')
         
@@ -217,7 +217,7 @@ if __name__ == '__main__':
         else:
             test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, shuffle=False, collate_fn=collate_fn, pin_memory=True)
         
-        if params.dataset in ['wiki500k', 'Amazon-670K']:
+        if params.dataset in ['wiki500k', 'amazon670k']:
             model = Detached_LightXML(params = params, train_ds = train_dataset).to(device)
         else:
             model = Detached_LightXML(params = params).to(device)

@@ -14,6 +14,7 @@ from Runner import Runner
 from Runner_sparse import SparseRunner
 # from Runner_accelerate import Runner
 from dist_eval_sampler import DistributedEvalSampler
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 NUM_LABELS = {'Amazon-670K': 670091, 'Amazon-3M': 2812281, 'Wiki-500K' : 501070, 'AmazonCat-13K': 13330, 'Wiki10-31K': 30938, 'Eurlex': 3993, 'AT670': 670091, 'WT500': 501070, 'WSAT350': 352072}
 NUM_CLUSTERS = {'Amazon-670K': 8192, 'Amazon-3M': 131072, 'Wiki-500K' : 65536, 'AmazonCat-13K': 128, 'Wiki10-31K': 256, 'Eurlex': 64, 'AT670': 8192, 'WT500':8192, 'WSAT350': 8192}
@@ -39,48 +40,24 @@ def init_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def main(params):
-    if params.distributed:  # parameters to initialize the process group
-        env_dict = {
-            key: os.environ[key]
-            for key in ("MASTER_ADDR", "MASTER_PORT", "RANK",
-                        "LOCAL_RANK", "WORLD_SIZE")
-        }
-        print(f"[{os.getpid()}] Initializing process group with: {env_dict}")
-        if params.sparse:
-            dist.init_process_group(backend="gloo")
-        else:
-            dist.init_process_group(backend="nccl")
-        print(
-            f"[{os.getpid()}] world_size = {dist.get_world_size()}, "
-            + f"rank = {dist.get_rank()}, backend={dist.get_backend()}"
-        )
-
-        params.rank = int(os.environ["RANK"])
-        params.local_rank = int(os.environ["LOCAL_RANK"])
-        n = torch.cuda.device_count() // params.local_world_size
-        device_ids = list(
-            range(params.local_rank * n, (params.local_rank + 1) * n)
-        )
-
-        print(
-            f"[{os.getpid()}] rank = {dist.get_rank()} ({params.rank}), "
-            + f"world_size = {dist.get_world_size()}, n = {n}, device_ids = {device_ids}"
-        )
-
-        # params.seed = params.local_rank + params.seed
+    
+    if params.distributed:
+        ddp_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
+        accelerator = Accelerator(kwargs_handlers=[ddp_handler])
     else:
-        params.local_rank = 0
-        device = torch.device('cuda:0')
+        accelerator = Accelerator(gradient_accumulation_steps=4)
+    
+    device = accelerator.device
 
     init_seed(params.seed)
-    params.num_labels = NUM_LABELS[params.dataset]
-    params.num_clusters = NUM_CLUSTERS[params.dataset]
-    params.model_name = get_exp_name()
-    if params.local_rank == 0:
+    if accelerator.is_main_process:
         print(get_exp_name())
         os.makedirs(params.model_name, exist_ok=True)
         print(f'load {params.dataset} dataset...')
     
+    params.num_labels = NUM_LABELS[params.dataset]
+    params.num_clusters = NUM_CLUSTERS[params.dataset]
+    params.model_name = get_exp_name()
     
     if len(params.load_model):
         params.load_model = os.path.join(params.model_name, params.load_model)
@@ -89,50 +66,29 @@ def main(params):
 
     X_train, X_test, Y_train, Y_test, X_tfidf, inv_prop = load_data(params.data_path, params.bert, params.num_labels, params.train_W)
     
-    # clusters = load_cluster_tree(params.dataset) if params.dataset in ['wiki500k', 'Amazon-670K'] else None
-    # train_dataset = MultiXMLData(X_train, Y_train, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='train')
-    # test_dataset = MultiXMLData(X_test, Y_test, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='test')
-    
     train_dataset = MultiXMLGeneral(X_train, Y_train, params, X_tfidf, mode='train')
     test_dataset = MultiXMLGeneral(X_test, Y_test, params, mode='test')
 
-    if params.distributed:
-        sampler = torch.utils.data.DistributedSampler(train_dataset, shuffle=True, seed=params.seed, 
-            num_replicas=int(env_dict['WORLD_SIZE']))
-        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, 
-            collate_fn=multi_collate, pin_memory=True, sampler=sampler, shuffle=False)
-        
-        if params.dist_eval:
-            sampler = DistributedEvalSampler(test_dataset, shuffle=False)
-            test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
-                collate_fn=multi_collate, pin_memory=True, sampler=sampler)
-        else:
-            test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
-                collate_fn=multi_collate, pin_memory=True, shuffle=False)
+    train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, 
+                                shuffle=True, collate_fn=multi_collate, pin_memory=True)
+    test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
+                                shuffle=False, collate_fn=multi_collate, pin_memory=True)
 
-    else:
-        shuf_train = not (params.return_embeddings or params.return_shortlist)
-        print("Shuffle Train dataloader : ", shuf_train)
-        train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, 
-                                    shuffle=shuf_train, collate_fn=multi_collate, pin_memory=True)
-        test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
-                                    shuffle=False, collate_fn=multi_collate, pin_memory=True)
-
-    model = CascadeXML(params = params, train_ds = train_dataset).to(device)
+    model = CascadeXML(params = params, train_ds = train_dataset)
 
     if params.sparse:
         runner = SparseRunner(params, train_dl, test_dl, inv_prop)
     else:
         runner = Runner(params, train_dl, test_dl, inv_prop)
 
-    if params.ensemble_files:
+    if params.ensemble_files and accelerator.is_main_process:
         print("Files to ensemble: ", params.ensemble_files)
         runner.test_ensemble(params)
 
-    runner.train(model, params, device)
+    runner.train(model, params, device, accelerator)
 
-    if params.distributed:
-        dist.destroy_process_group()  # tear down the process group
+    # if params.distributed:
+    #     dist.destroy_process_group()  # tear down the process group
 
 
 if __name__ == '__main__':

@@ -60,6 +60,8 @@ class LightXML(nn.Module):
                 max_group = {65536:8}
             elif params.dataset == 'AT670':
                 max_group = {8192:82}
+            elif params.dataset == 'AT131':
+                max_group = {8192:max([len(c) for c in group_y])}
 
             num_clusters = group_y.shape[0]
             for i in range(num_clusters):

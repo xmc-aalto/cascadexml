@@ -3,19 +3,17 @@ import torch.nn as nn
 import numpy as np
 import scipy.sparse as sp
 
-from transformers import AdamW
+from torch.optim import AdamW, SparseAdam
 from tqdm import tqdm
-from adahessian import Adahessian
 
 from torch.cuda.amp import GradScaler
 import torch.distributed as dist
 from training_schedule import ThreePhaseOneCycleLR
 import os
 from sklearn.preprocessing import normalize
-from torch.optim.swa_utils import SWALR, AveragedModel
 import copy
 
-class Runner:
+class SparseRunner:
     def __init__(self, params, train_dl, test_dl, inv_prop, top_k=5):
         self.train_dl = train_dl
         self.test_dl = test_dl
@@ -28,17 +26,16 @@ class Runner:
         self.inv_prop = torch.from_numpy(inv_prop)
 
     def save_model(self, model, epoch, name):
-        # model.swa_swap_params()
         checkpoint = {
             'state_dict': model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
+            # 'sparse_optimizer': self.sparse_optimizer.state_dict(),
+            # 'dense_optimizer': self.dense_optimizer.state_dict(),
             'epoch': epoch,
-            'scaler': self.scaler.state_dict()
+            # 'scaler': self.scaler.state_dict()
         }
         torch.save(checkpoint, name)
-        # model.swa_swap_params()
 
-    def load_model(self, model, name, finetune):
+    def load_model(self, model, name, load_opt=True):
         # model_name = name.split('/')[-2]
         # print("Loading model: " + model_name)
         
@@ -48,9 +45,10 @@ class Runner:
         except RuntimeError as E:
             print(E)
 
-        if not finetune:
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
-            self.scaler.load_state_dict(checkpoint["scaler"])
+        # if load_opt:
+        #     self.sparse_optimizer.load_state_dict(checkpoint['sparse_optimizer'])
+        #     self.dense_optimizer.load_state_dict(checkpoint['dense_optimizer'])
+        #     self.scaler.load_state_dict(checkpoint["scaler"])
         init = checkpoint['epoch']
         return model, init
     
@@ -89,8 +87,11 @@ class Runner:
 
     def fit_one_epoch(self, model, params, device, epoch):
         trainLoss = torch.tensor(0.0).to(device)
-        self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
-        use_r = params.use_r
+        if isinstance(model,  nn.parallel.DistributedDataParallel):
+            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
+        else:
+            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+        
         # self.recall = [torch.zeros(100, dtype=np.int).to(device) for _ in range(2)]
 
         model.train()
@@ -99,7 +100,8 @@ class Runner:
         if self.use_swa and epoch == self.swa_warmup_epoch:
             model.swa_init()
         
-        self.optimizer.zero_grad()
+        self.dense_optimizer.zero_grad()
+        self.sparse_optimizer.zero_grad()
 
         if params.local_rank==0:
             print(f'\nStarting Epoch: {epoch}\n')
@@ -107,22 +109,34 @@ class Runner:
         else:
             pbar = self.train_dl
 
+        # train_iter = iter(self.train_dl)
+        # for step in range(len(self.train_dl)):
+        #     print("Step ", step)
+        #     sample = next(train_iter)
         for step, sample in enumerate(pbar):
             x_batch, attention_mask, labels = sample[0].to(device), sample[1].to(device), sample[2]
             
-            with torch.cuda.amp.autocast():
-                all_probs, all_candidates, loss = model(x_batch, attention_mask, epoch, labels, use_precomputed=params.train_W, use_r=use_r)
-            self.scaler.scale(loss).backward()
+            # with torch.cuda.amp.autocast():
+            #     all_probs, all_candidates, loss = model(x_batch, attention_mask, epoch, labels)
+            # self.scaler.scale(loss).backward()
+            # else:
+            all_probs, all_candidates, loss = model(x_batch, attention_mask, epoch, labels)
+            loss.backward()
             
-            if not params.distributed:
-                if (step + 1) % 4 == 0:
-                    # self.scaler.unscale_(self.optimizer)
-                    # nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # if not params.distributed:
+            if (step + 1) % 1 == 0:
+                # self.scaler.unscale_(self.optimizer)
+                # nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad()
-                    self.cycle_scheduler.step()
+                # self.scaler.step(self.sparse_optimizer)
+                # self.scaler.step(self.dense_optimizer)
+                self.sparse_optimizer.step()
+                self.dense_optimizer.step()
+                # self.scaler.update()
+                self.dense_optimizer.zero_grad()
+                self.sparse_optimizer.zero_grad()
+                self.dense_cycle_scheduler.step()
+                self.sparse_cycle_scheduler.step()
 
             trainLoss += loss.item()
 
@@ -140,23 +154,19 @@ class Runner:
                 ]
             
             for i, (preds, label) in enumerate(zip(all_preds, labels)):
-                # if use_r:
-                #     label, _ = zip(*label)
                 self.predict(preds, label, i)
             
-            # pbar.set_postfix({'group_counts': self.group_count.tolist(), 'extreme_counts': self.extreme_count.tolist()})
-        
-        if params.local_rank == 0:
-            if params.distributed:
-                dist.reduce(trainLoss, dst=0, op=dist.ReduceOp.SUM)
-                for c in self.counts:
-                    dist.reduce(c, dst=0, op=dist.ReduceOp.SUM)
+        if params.distributed:
+            dist.all_reduce(trainLoss, op=dist.ReduceOp.SUM)
+            for c in self.counts:
+                dist.all_reduce(c, op=dist.ReduceOp.SUM)
 
+        if params.local_rank == 0:
             trainLoss /= len_dl
             precs = [count.detach().cpu().numpy() * 100.0 / (self.num_train * np.arange(1, self.top_k+1)) for count in self.counts]
 
             print(f"Epoch: {epoch},  Train Loss: {trainLoss.item()}")
-            print("Grouped LRs: ", [param_group['lr'] for param_group in self.optimizer.param_groups])
+            print("Grouped LRs: ", [param_group['lr'] for param_group in self.dense_optimizer.param_groups])
             for i in range(len(precs)):
                 print(f'Level-{i} Training Scores: P@1: {precs[i][0]:.2f}, P@3: {precs[i][2]:.2f}, P@5: {precs[i][4]:.2f}')
             print()
@@ -166,10 +176,10 @@ class Runner:
 
         # if trainLoss < self.best_train_Loss:
             # self.best_train_Loss = trainLoss
-        # if epoch in [8, 9, 10, 11, 15]:
+        # if epoch in [3]:
         #     self.save_model(model, epoch, params.model_name + f"/model_{epoch}.pth")
-        
-        self.test(model, params, device, epoch)
+        if epoch > 10:
+            self.test(model, params, device, epoch)
 
     def train(self, model, params, device):
         # test only on one process
@@ -185,34 +195,40 @@ class Runner:
 
         no_decay = ['bias', 'LayerNorm.weight']
         
-        if params.train_W:
-            optimizer_grouped_parameters = [
-                {'params': module.bert.parameters(), 'weight_decay': 0.05, 'lr': lr},
-                {'params': module.Cn[:-1].parameters(), 'weight_decay': 0.005, 'lr': lr*10},
-                {'params': module.Cn[-1].parameters(), 'weight_decay': 0.005, 'lr': lr}
-            ]
+        #ADDED
+        module.Cn[-1].to('cuda:1')
+        # module.Cn_bias[-1].to('cuda:1')
 
-        else:
-            wd = params.weight_decay 
-            optimizer_grouped_parameters = [
-                {'params': [p for n, p in module.bert.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': wd, 'lr': lr},
-                {'params': [p for n, p in module.bert.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': lr},
-                {'params': [p for n, p in [*module.Cn_hidden.named_parameters(), *module.Cn.named_parameters()] 
-                                                if not any(nd in n for nd in no_decay)], 'weight_decay': wd/10, 'lr': lr*10},
-                {'params': [p for n, p in [*module.Cn_hidden.named_parameters()] if any(nd in n for nd in no_decay)] + 
-                                                    [p for n, p in [*module.Cn_bias.named_parameters()]], 'weight_decay': 0.0, 'lr': lr*10}
-            ]
+        wd = params.weight_decay 
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in module.bert.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': wd, 'lr': lr},
+            {'params': [p for n, p in module.bert.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': lr},
+            {'params': [p for n, p in module.Cn_hidden.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': wd/10, 'lr': lr*10},
+            {'params': [p for n, p in module.Cn_hidden.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': lr*10}
+        ]
+        
+        # sparse_opt_groups = [
+        #     {'params': [p for n, p in module.Cn.named_parameters()], 'weight_decay': wd/10, 'lr': lr*10},
+        #     {'params': [p for n, p in module.Cn_bias.named_parameters()], 'weight_decay': 0.0, 'lr': lr*10}
+        # ]
+        sparse_opt_groups = [
+            {'params': [p for n, p in module.Cn.named_parameters()], 'lr': lr*10},
+            {'params': [p for n, p in module.Cn_bias.named_parameters()], 'lr': lr*10}
+        ]
         
         self.scaler = GradScaler()
-        self.optimizer = AdamW(optimizer_grouped_parameters, lr = lr)
+        self.dense_optimizer = AdamW(optimizer_grouped_parameters, lr = lr)
+        # self.sparse_optimizer = SparseAdam(sparse_opt_groups, lr=lr)
+        self.sparse_optimizer = torch.optim.SGD(sparse_opt_groups, lr=lr, momentum=0.9)
         
         init = 0
         last_batch = -1
 
         if len(params.load_model):
+            load_opt = not(params.return_embeddings or params.test)
             print("Loading model from ", params.load_model)
-            model, init = self.load_model(model, params.load_model, params.train_W)
-            last_batch = init*(steps_per_epoch//4)
+            model, init = self.load_model(model, params.load_model)
+            last_batch = init*steps_per_epoch
             
             if params.test:
                 self.test(model, params, device, init)
@@ -221,62 +237,23 @@ class Runner:
             if params.return_embeddings:
                 self.return_embeddings(model, params)
 
-            if params.return_shortlist:
-                self.return_shortlist(model, params)
-
-            # init = 0
-            # last_batch = -1
-            # print("Reinitializing Cn weights")
-            # model.reinit_weights()
-
-            # if params.train_W:
-            #     for param in model.bert.parameters():
-            #         param.requires_grad = False
-
-                # for param in model.bert.embeddings.parameters():
-                #     param.requires_grad = False
-
-                # print(f"Freezing first {params.freeze_layer_count} layers.")
-                # for layer in model.bert.encoder.layer[:params.freeze_layer_count]:
-                #     for param in layer.parameters():
-                #         param.requires_grad = False
-
-            # lrs = [lr, lr, lr*10, lr*10, lr*10]
-            # for i, param_group in enumerate(self.optimizer.param_groups):
-            #     param_group['lr'] = lrs[i]
-
         if params.test:
             self.test(model, params, device, init)
             return
 
-        if params.train_W:
-            self.cycle_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer=self.optimizer, max_lr=[lr, lr, lr, lr*10, lr], epochs=params.num_epochs, 
-                steps_per_epoch=steps_per_epoch//4 + 1, pct_start=0.4,
-                div_factor=20, final_div_factor=200, last_epoch=last_batch)
-        else:
-            self.cycle_scheduler = ThreePhaseOneCycleLR(
-                optimizer=self.optimizer, max_lr=[lr, lr, lr*10, lr*10], epochs=params.num_epochs, 
-                steps_per_epoch=steps_per_epoch//4 + 1, pct_epoch=[params.warmup, params.num_epochs-3],
-                div_factor=10, final_div_factor=100, last_epoch=last_batch, three_phase=True) 
+        self.dense_cycle_scheduler = ThreePhaseOneCycleLR(
+            optimizer=self.dense_optimizer, max_lr=[lr, lr, lr*10, lr*10], epochs=params.num_epochs, 
+            steps_per_epoch=steps_per_epoch, pct_epoch=[params.warmup, params.num_epochs-3],
+            div_factor=10, final_div_factor=100, last_epoch=last_batch, three_phase=True) 
 
-        print("Starting LRs per group: ", [param_group['lr'] for param_group in self.optimizer.param_groups])
-        
-        # self.collate_swa_weights(model, params)
+        self.sparse_cycle_scheduler = ThreePhaseOneCycleLR(
+            optimizer=self.sparse_optimizer, max_lr=[lr*10, lr*10], epochs=params.num_epochs, 
+            steps_per_epoch=steps_per_epoch, pct_epoch=[params.warmup, params.num_epochs-3],
+            div_factor=10, final_div_factor=100, last_epoch=last_batch, three_phase=True) 
+
+        print("Starting LRs per group: ", [param_group['lr'] for param_group in self.dense_optimizer.param_groups])
 
         for epoch in range(init, params.num_epochs):
-            # if epoch >= 15:
-            #     for param in model.bert.embeddings.parameters():
-            #         param.requires_grad = False
-
-            #     params.freeze_layer_count = [-1]*15 + [6, 9, 12, 12]
-            #     if params.freeze_layer_count[epoch] != -1:
-            #         print(f"Freezing first {params.freeze_layer_count[epoch]} layers.")
-            #         # if freeze_layer_count == -1, we only freeze the embedding layer
-            #         # otherwise we freeze the first `freeze_layer_count` encoder layers
-            #         for layer in model.bert.encoder.layer[:params.freeze_layer_count[epoch]]:
-            #             for param in layer.parameters():
-            #                 param.requires_grad = False
             self.fit_one_epoch(model, params, device, epoch+1)
 
     @torch.no_grad()
@@ -286,8 +263,12 @@ class Runner:
             return
         
         model.eval()
-        self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
-        self.weighted_counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+        if isinstance(model,  nn.parallel.DistributedDataParallel):
+            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
+            self.weighted_counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
+        else:
+            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+            self.weighted_counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
         
         self.num = torch.zeros(self.top_k).cuda()
         self.den = torch.zeros(self.top_k).cuda()
@@ -299,11 +280,13 @@ class Runner:
         else:
             pbar = self.test_dl
 
+        idx, cands, cprobs = [], [], []
+
         for step, sample in enumerate(pbar): 
             x_batch, attention_mask, labels = sample[0].to(device), sample[1].to(device), sample[2]
 
             with torch.cuda.amp.autocast():
-                all_probs, all_candidates, all_probs_weighted = model(x_batch, attention_mask, epoch, use_precomputed=params.train_W)
+                all_probs, all_candidates, all_probs_weighted = model(x_batch, attention_mask, epoch)
 
             all_preds = [torch.topk(probs, self.top_k)[1].cpu() for probs in all_probs]
             all_weighted_preds = [torch.topk(probs, self.top_k)[1].cpu() for probs in all_probs_weighted]
@@ -314,7 +297,15 @@ class Runner:
 
                 all_weighted_preds = [candidates[np.arange(preds.shape[0]).reshape(-1, 1), preds].cpu()
                     for candidates, preds in zip(all_candidates, all_weighted_preds)]
-            
+
+            ens_probs, ens_cand = torch.topk(all_probs_weighted[-1], 20)
+            # ens_probs, ens_cand = torch.topk(all_probs[-1], 20)
+            ens_cand = all_candidates[-1][np.arange(ens_cand.shape[0]).reshape(-1, 1), ens_cand]
+
+            idx.append(torch.repeat_interleave(torch.arange(ens_cand.shape[0]), ens_cand.shape[1]) + step*params.batch_size)
+            cands.append(torch.flatten(ens_cand).detach().cpu())
+            cprobs.append(torch.flatten(ens_probs).detach().cpu())
+
             for i, (preds, w_preds, label) in enumerate(zip(all_preds, all_weighted_preds, labels)):
                 self.predict(preds, label, i)
                 if i > 0:
@@ -322,13 +313,13 @@ class Runner:
             
             # self.psp(all_preds[-1], labels[-1])
             # pbar.set_postfix({'group_counts': self.group_count.tolist(), 'extreme_counts': self.extreme_count.tolist()})
+        if params.distributed:
+            for c, wc in zip(self.counts, self.weighted_counts):
+                dist.all_reduce(c, op=dist.ReduceOp.SUM)
+                dist.all_reduce(wc, op=dist.ReduceOp.SUM)
 
-        if params.local_rank == 0:
-            if params.distributed:
-                for c, wc in zip(self.counts, self.weighted_counts):
-                    dist.reduce(c, dst=0, op=dist.ReduceOp.SUM)
-                    dist.reduce(wc, dst=0, op=dist.ReduceOp.SUM)
 
+        if params.local_rank == 0:          
             precs = [count.detach().cpu().numpy() * 100.0 / (self.num_test * np.arange(1, self.top_k+1)) for count in self.counts]
             weighted_precs = [count.detach().cpu().numpy() * 100.0 / (self.num_test * np.arange(1, self.top_k+1)) for count in self.weighted_counts]
             # psp = (self.num * 100 / self.den).detach().cpu().numpy()
@@ -338,6 +329,14 @@ class Runner:
                 if i != 0:
                     print(f'Level-{i} Weighted Test Scores: P@1: {weighted_precs[i][0]:.2f}, P@3: {weighted_precs[i][2]:.2f}, P@5: {weighted_precs[i][4]:.2f}')
             # print(f"Level-{i} Weighted PSP Score: PSP@1: {psp[0]:.2f}, PSP@3: {psp[2]:.2f}, PSP@5: {psp[4]:.2f}")
+            print()
+
+            idx = torch.concat(idx, dim=0)
+            cands = torch.concat(cands, dim=0)
+            cprobs = torch.concat(cprobs, dim=0)
+
+            logits = sp.csr_matrix((cprobs, (idx, cands)), (len(self.test_dl.dataset), params.num_labels+1))
+            sp.save_npz(f'./{params.dataset}_{params.bert}_{params.seed}_best_preds.npz', logits)
 
             if self.use_swa:
                 model.swa_swap_params()
@@ -345,10 +344,58 @@ class Runner:
             if(precs[-1][0]+precs[-1][2]+precs[-1][4] > self.best_test_acc and not params.test):
                 self.best_test_acc = precs[-1][0]+precs[-1][2]+precs[-1][4]
                 self.save_model(model, epoch, params.model_name + "/model_best_test.pth")
-            print()
             
         if params.distributed:
             dist.barrier()
+
+    def test_ensemble(self, params):
+        
+        self.counts = [torch.zeros(self.top_k, dtype=np.int)]
+        self.num = torch.zeros(self.top_k)
+        self.den = torch.zeros(self.top_k)
+        
+        ensemble_cands = []
+        for fil in params.ensemble_files:
+            if fil[-4:] == '.txt':
+                with open(fil) as f:
+                    row_idx, col_idx, val_idx = [], [], []
+                    predictions = f.readlines()
+                    predictions = predictions[1:]
+                    for i, scores in enumerate(predictions):
+                        scores = scores.replace('\n', '').split()
+                        labels = [int(x.split(':')[0]) for x in scores]
+                        lab_scores = torch.tensor([float(x.split(':')[1]) for x in scores]).sigmoid()
+                        for l, s in zip(labels, lab_scores):
+                            row_idx.append(i)
+                            col_idx.append(l)
+                            val_idx.append(s)
+                    m = max(row_idx) + 1
+                    n = params.num_labels
+                    Y = sp.csr_matrix((val_idx, (row_idx, col_idx)), shape=(m, n))
+                    sp.save_npz(os.path.splitext(fil)[0]+'.npz', Y)
+            else:
+                Y = sp.load_npz(fil)
+            ensemble_cands.append(Y)
+
+        for i, batch_data in enumerate(tqdm(self.test_dl, desc=f"Testing Ensemble")):
+            y_tr = batch_data[2]
+            
+            logits = ensemble_cands[0][i*params.batch_size : (i+1)*params.batch_size]
+            for result in ensemble_cands[1:]:
+                logits += result[i*params.batch_size : (i+1)*params.batch_size]
+
+            logits = torch.FloatTensor(logits.todense())
+            preds = torch.topk(logits, self.top_k)[1]
+            self.predict(preds, y_tr[-1], 0)
+            self.psp(preds, y_tr[-1])
+            
+        prec = self.counts[0].numpy() * 100.0 / (self.num_test * np.arange(1, self.top_k+1))
+        psp = (self.num * 100 / self.den).numpy()
+
+        print(f"Test scores: P@1: {prec[0]:.2f}, P@3: {prec[2]:.2f}, P@5: {prec[4]:.2f}\n")
+        print(f"Test Propensity scores: PSP@1: {psp[0]:.2f}, PSP@3: {psp[2]:.2f}, PSP@5: {psp[4]:.2f}\n")
+        exit()
+
 
 
     @torch.no_grad()
@@ -365,7 +412,7 @@ class Runner:
             train_feats.append(bert_feats)
         
         train_feats = torch.cat(train_feats, dim=0).numpy()
-        np.save('./bert_trn_68_75.npy', train_feats)
+        np.save(f'./{params.dataset}_trn_{params.seed}.npy', train_feats)
 
         pbar = tqdm(self.test_dl, desc=f"Creating test data embeddings")
         
@@ -376,7 +423,7 @@ class Runner:
             test_feats.append(bert_feats)
         
         test_feats = torch.cat(test_feats, dim=0).numpy()
-        np.save('./bert_tst_68_75.npy', test_feats)
+        np.save(f'./{params.dataset}_tst_{params.seed}.npy', test_feats)
 
         exit()
 
@@ -400,17 +447,6 @@ class Runner:
 
         shortlist = sp.csr_matrix((value, (row_idx, col_idx)), shape=(n, m))
         shortlist = shortlist[:, :-1]
-        sp.save_npz('W10_Shortlist.npz', shortlist)
-
-        # pbar = tqdm(self.test_dl, desc=f"Creating test data embeddings")
-        
-        # for step, sample in enumerate(pbar): 
-        #     x_batch, attention_mask = sample[0].cuda(), sample[1].cuda()
-        #     with torch.cuda.amp.autocast():
-        #         bert_feats = model(x_batch, attention_mask, 0)
-        #     test_feats.append(bert_feats)
-        
-        # test_feats = torch.cat(test_feats, dim=0).numpy()
-        # np.save('./bert_tst_68_23.npy', test_feats)
+        sp.save_npz('W10_Shortlist_ext.npz', shortlist)
 
         exit()

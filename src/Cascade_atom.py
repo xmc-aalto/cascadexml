@@ -243,6 +243,18 @@ class CascadeXML(nn.Module):
                         new_rs = torch.stack(new_rs)
                     all_losses[-1] = (all_losses[-1] * new_rs).mean()
                 
+                # if i == 0:
+                #     # idx = torch.stack([
+                #     #         torch.where(labels[i])[0][torch.randperm(int(labels[i].sum()))[0]] for i in torch.arange(labels.shape[0])
+                #     #     ])
+                #     # pos = embed_weights[torch.arange(labels.shape[0]), idx]
+                #     # pos = (F.normalize(embed_weights, dim=-1) * labels.unsqueeze(-1)).sum(1)/labels.sum(1).unsqueeze(-1)
+                #     pos = (embed_weights * labels.unsqueeze(-1)).sum(1)/labels.sum(1).unsqueeze(-1)
+                # if i >= 1:
+                #     pos, emb_loss = self.embedding_loss(pos, embed_weights, labels, logits)
+                #     # all_losses[-1] += 0.5 * emb_loss
+                #     all_losses[-1] += (0.15 if i==1 else 0.05) * emb_loss
+
                 prev_labels = labels
         
         if self.is_training:
@@ -274,4 +286,33 @@ class CascadeXML(nn.Module):
         for n, p in self.named_parameters():
             self.swa_state[n], p.data =  self.swa_state[n].cpu(), p.data.cpu()
             self.swa_state[n], p.data =  p.data.cpu(), self.swa_state[n].cuda()
+
+
+    def embedding_loss(self, pos, embed_weights, labels, logits, k=5, margin=1):
+        neg_inds = torch.topk((1 - labels) * logits.sigmoid(), k, dim=1).indices
+        
+        # repeat_interleave: [0,0...(k times), 1,1...(k times), ... B,B...(k times)]
+        # neg = F.normalize(embed_weights[torch.arange(embed_weights.shape[0]).repeat_interleave(k), neg_inds.reshape(-1)], dim=-1) # Bxk, 768
+        
+        neg = embed_weights[torch.arange(embed_weights.shape[0]).repeat_interleave(k), neg_inds.reshape(-1)] # Bxk, 768
+        neg = neg.reshape(labels.shape[0], k, neg.shape[-1]).sum(1)/k
+
+        # neg = embed_weights[torch.arange(embed_weights.shape[0]).repeat_interleave(k), neg_inds.reshape(-1)] # Bxk, 768
+        # neg = neg.reshape(labels.shape[0], k, neg.shape[-1])
+        # neg = torch.stack([neg[i, torch.randperm(k)[0]] for i in range(len(neg))])
+        
+        # idx = torch.stack([
+        #         torch.where(labels[i])[0][torch.randperm(int(labels[i].sum()))[0]] for i in torch.arange(labels.shape[0])
+        #     ])
+        # anchor = embed_weights[torch.arange(labels.shape[0]), idx]
+        
+        # anchor = (F.normalize(embed_weights, dim=-1) * labels.unsqueeze(-1)).sum(1)/labels.sum(1).unsqueeze(-1)
+        anchor = (embed_weights * labels.unsqueeze(-1)).sum(1)/labels.sum(1).unsqueeze(-1)
+
+        # contrastive triplet; single emb triplet
+        # return anchor, F.triplet_margin_loss(anchor, pos, neg, margin)
+        # return anchor, F.triplet_margin_loss(pos, anchor, neg, margin)
+        return anchor, F.triplet_margin_with_distance_loss(anchor, pos, neg, 
+                                                        distance_function=F.cosine_similarity, 
+                                                        margin=margin)
 

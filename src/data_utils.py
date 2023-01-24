@@ -5,11 +5,12 @@ import numpy as np
 from torch.utils.data import Dataset
 import scipy.sparse as sp
 from tqdm import tqdm
-from transformers import BertTokenizer
+from transformers import BertTokenizer, RobertaTokenizer, XLNetTokenizer
 import re
 from nltk.corpus import stopwords
 from multiprocessing import Pool, cpu_count
 from tqdm.contrib.concurrent import process_map
+# from xclib.data import data_utils as du
 
 cachedStopWords = stopwords.words("english")
 
@@ -18,7 +19,7 @@ def clean_str(string):
     string = re.sub(r"_", " ", string)
     string = re.sub("\[\d+\]", "", string)
     string = re.sub(r"[^A-Za-z0-9!?\.\'\`]", " ", string)
-    string = ' '.join([word for word in string.split() if word not in cachedStopWords])
+    # string = ' '.join([word for word in string.split() if word not in cachedStopWords])
     # string = re.sub('(?<=[A-Za-z]),', ' ', string)
     # string = re.sub(r"(),!?", " ", string)
     # string = re.sub(r"[^A-Za-z0-9!?\.\'\`]", " ", string)
@@ -37,9 +38,7 @@ def get_fast_tokenizer(self):
     elif 'xlnet' in self.bert_name:
         tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased') 
     else:
-        tokenizer = BertWordPieceTokenizer(
-            "data/.bert-base-uncased-vocab.txt",
-            lowercase=True)
+        tokenizer = BertWordPieceTokenizer("data/.bert-base-uncased-vocab.txt", lowercase=True)
     return tokenizer
 
 def get_tokenizer(model_name):
@@ -61,8 +60,8 @@ def get_inv_prop(dataset, Y):
 
     print("Creating inv_prop file")
     
-    A = {'Amazon-670K': 0.6, 'Amazon-3M': 0.6, 'AmazonCat-13K': 0.6, 'Wiki-500K' : 0.5, 'Wiki10-31K' : 0.5}
-    B = {'Amazon-670K': 2.6, 'Amazon-3M': 2.6, 'AmazonCat-13K': 2.6, 'Wiki-500K': 0.4, 'Wiki10-31K': 0.4}
+    A = {'Eurlex': 0.6, 'Amazon-670K': 0.6, 'Amazon-3M': 0.6, 'AmazonCat-13K': 0.55, 'Wiki-500K' : 0.5, 'Wiki10-31K' : 0.55}
+    B = {'Eurlex': 2.6, 'Amazon-670K': 2.6, 'Amazon-3M': 2.6, 'AmazonCat-13K': 1.5, 'Wiki-500K': 0.4, 'Wiki10-31K': 1.5}
 
     d = dataset.split('/')[-1]
     a, b = A[d], B[d]
@@ -76,6 +75,27 @@ def get_inv_prop(dataset, Y):
     np.save(os.path.join(dataset, 'inv_prop.npy'), inv_prop)
     return inv_prop
 
+def load_short_data(data_path):
+
+    trn_data, tst_data, lbl_data = [], [], []
+    with open(os.path.join(data_path, 'trn.json')) as fin:
+        for info in tqdm(fin.readlines(), desc='Reading training data'):
+            info = json.loads(info)
+            trn_data.append(info['title'])
+
+    with open(os.path.join(data_path, 'tst.json'), 'r') as fin:
+        for info in tqdm(fin.readlines(), desc='Reading testing data'):
+            info = json.loads(info)
+            tst_data.append(info['title'])
+
+    
+    with open(os.path.join(data_path, 'lbl.json'), 'r') as fin:
+        for info in tqdm(fin.readlines(), desc='Reading label data'):
+            info = json.loads(info)
+            lbl_data.append(info['title'])
+
+    return trn_data, tst_data, lbl_data
+
 def make_csr_tfidf(dataset):
     file_name = f'{dataset}/tfidf.npz'
     if os.path.exists(file_name):
@@ -86,7 +106,11 @@ def make_csr_tfidf(dataset):
             for i, data in enumerate(fil.readlines()):
                 data = data.split()[1:]
                 for tfidf in data:
-                    token, weight = tfidf.split(':')
+                    try:
+                        token, weight = tfidf.split(':')
+                    except: 
+                        print(f'Issue with token at line number {i}: {tfidf}')
+                        continue
                     row_idx.append(i)
                     col_idx.append(int(token))
                     val_idx.append(float(weight))
@@ -118,38 +142,46 @@ def encode(text):
     return sp_token.encode(text, add_special_tokens=False)
 
 # tokenizer = get_tokenizer(model)
+
 def create_data(dataset, model):
     print(f"Creating new data for {model} model")
     tokenizer = get_tokenizer(model)
     global sp_token 
     sp_token = tokenizer
 
-    fext = '_texts.txt' if dataset == 'Eurlex-4K' else '_raw_texts.txt'
+    # train_texts, test_texts, lbl_texts = load_short_data(dataset)
     train_texts, test_texts = [], []
-    with open(f'{dataset}/train{fext}') as f:
+    with open(f'{dataset}/train_raw_texts.txt') as f:
         for point in tqdm(f.readlines()):
-            train_texts.append(point.replace('\n', ''))
-            # text = tokenizer.encode(point.replace('\n', ''), add_special_tokens=False)
-            # text = tokenizer.encode(clean_str(point), add_special_tokens=False)
-            # train_texts.append(text)
+            # train_texts.append(clean_str(point))
+            point = point.replace('\n', ' ')
+            point = point.replace('_', ' ')
+            point = re.sub(r"\s{2,}", " ", point)
+            point = re.sub("/SEP/", "[SEP]", point)
+            train_texts.append(point)
 
-    with open(f'{dataset}/test{fext}') as f:
+    with open(f'{dataset}/test_raw_texts.txt') as f:
         for point in tqdm(f.readlines()):
-            test_texts.append(point.replace('\n', ''))
-            # text = tokenizer.encode(point.replace('\n', ''), add_special_tokens=False)
-            # text = tokenizer.encode(clean_str(point), add_special_tokens=False)
-            # test_texts.append(text)
+            # test_texts.append(clean_str(point))
+            # test_texts.append(point.replace('\n', ''))
+            point = point.replace('\n', ' ')
+            point = point.replace('_', ' ')
+            point = re.sub(r"\s{2,}", " ", point)
+            point = re.sub("/SEP/", "[SEP]", point)
+            test_texts.append(point)
     
-    with Pool(cpu_count() - 1) as p:
-        encoded_train = process_map(encode, train_texts, max_workers=cpu_count()-1)
+    print(f"Available CPU Count is: {cpu_count()}")
+
+    os.makedirs(f'{dataset}/{model}', exist_ok=True)
 
     with Pool(cpu_count() - 1) as p:
-        encoded_test = process_map(encode, test_texts, max_workers=cpu_count()-1)
-
-    os.makedirs(f'{dataset}/{model}')
+        encoded_train = process_map(encode, train_texts, max_workers=cpu_count()-1, chunksize=100)
 
     with open(f'{dataset}/{model}/train_encoded.pkl', 'wb') as f:
         pkl.dump(encoded_train, f)
+
+    with Pool(cpu_count() - 1) as p:
+        encoded_test = process_map(encode, test_texts, max_workers=cpu_count()-1, chunksize=100)
 
     with open(f'{dataset}/{model}/test_encoded.pkl','wb') as f:
         pkl.dump(encoded_test, f)
@@ -157,50 +189,33 @@ def create_data(dataset, model):
 def load_data(dataset, model, num_labels, load_precomputed): 
     train_labels, test_labels = [], []
     train_texts, test_texts = [], []
-
-    name_map = {'wiki31k': 'Wiki10-31K',
-                'wiki500k': 'Wiki-500K',
-                'amazoncat13k': 'AmazonCat-13K',
-                'amazon670k': 'Amazon-670K',
-                'eurlex4k': 'Eurlex-4K',
-                'AT670': 'AmazonTitles-670K',
-                'WT500': 'WikiTitles-500K',
-                'WSAT350': 'WikiSeeAlsoTitles-350K',
-                }
     
-    # assert dataset in name_map
-    # dataset = name_map[dataset]
+    print(f"Loading data for {dataset}")
+
+    assert any([x in model for x in ['roberta', 'bert', 'xlnet']]), f'Tokenizer for {model} not implemented. Add it src/data_utils.py and rerun'
+
+    if not os.path.exists(f'{dataset}/{model}/train_encoded.pkl'):
+        create_data(dataset, model)
     
-    # The following code ensures that data is not re-created when different bert/roberta/xlnet are used, since they use the same tokenizer. 
-    if load_precomputed:
-        train_texts = np.load('./bert_train_768.npy')
-        test_texts = np.load('./bert_test_768.npy')
-    else:
-        assert any([x in model for x in ['roberta', 'bert', 'xlnet']]), f'Tokenizer for {model} not implemented. Add it src/data_utils.py and rerun'
+    with open(f'{dataset}/{model}/train_encoded.pkl', 'rb') as f:
+        train_texts = pkl.load(f)
+    
+    # if dataset == './data/Wiki-500K':
+    #     print("truncating train texts")
+    #     for i, text in enumerate(train_texts):
+    #          train_texts[i] = text[:128]
 
-        if not os.path.exists(f'{dataset}/{model}'):
-            create_data(dataset, model)
-        
-        with open(f'{dataset}/{model}/train_encoded.pkl', 'rb') as f:
-            train_texts = pkl.load(f)
-        
-        # print("truncating train texts")
-        # for i, text in enumerate(train_texts):
-        #     train_texts[i] = text[:1024]
+    with open(f'{dataset}/{model}/test_encoded.pkl', 'rb') as f:
+        test_texts = pkl.load(f)
 
-        # with open(f'{dataset}/{model}/train_encoded_short.pkl', 'wb') as f:
-        #     pkl.dump(train_texts, f)
+    # with open(f'{dataset}/{model}/lbl_encoded.pkl', 'rb') as f:
+    #     lbl_texts = pkl.load(f)
 
-        with open(f'{dataset}/{model}/test_encoded.pkl', 'rb') as f:
-            test_texts = pkl.load(f)
-        
-        # print("truncating test texts")
-        # for i, text in enumerate(test_texts):
-        #     test_texts[i] = text[:1024]
-
-        # with open(f'{dataset}/{model}/test_encoded_short.pkl','wb') as f:
-        #     pkl.dump(test_texts, f)
-
+    # if dataset == './data/Wiki-500K':
+    #     print("truncating test texts")
+    #    	for i, text in enumerate(test_texts):
+    #    	     test_texts[i] = text[:128]
+    
     train_labels = make_csr_labels(num_labels, f'{dataset}/Y.trn.npz')
     test_labels = make_csr_labels(num_labels, f'{dataset}/Y.tst.npz')
     tfidf = make_csr_tfidf(dataset)
@@ -219,8 +234,8 @@ def load_group(dataset, num_clusters):
         return np.load(f'AmazonTitles-670K/label_group8192.npy', allow_pickle=True)
     if dataset == 'WSAT':
         return np.load(f'WikiSeeAlsoTitles-350K/label_group_{num_clusters}.npy', allow_pickle=True)  
-    if dataset == 'WT500':
-        return np.load(f'WikiTitles-500K/label_group_{num_clusters}.npy', allow_pickle=True)            
+    if dataset == 'LF-AmazonTitles-131K':
+        return np.load(f'../Datasets/{dataset}/label_group_0.npy', allow_pickle=True)            
 
 def load_cluster_tree(dataset, levels=2):
     if dataset == 'Amazon-670K':
