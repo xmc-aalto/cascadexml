@@ -39,6 +39,8 @@ def init_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def main(params):
+    assert not (params.distributed and params.sparse), "DDP doesn't work with sparse gradients. NVCC backend doesn't support sparse and gloo is too slow to train"
+    
     if params.distributed:  # parameters to initialize the process group
         env_dict = {
             key: os.environ[key]
@@ -81,7 +83,6 @@ def main(params):
         os.makedirs(params.model_name, exist_ok=True)
         print(f'load {params.dataset} dataset...')
     
-    
     if len(params.load_model):
         params.load_model = os.path.join(params.model_name, params.load_model)
 
@@ -102,6 +103,7 @@ def main(params):
         train_dl = DataLoader(train_dataset, batch_size=params.batch_size, num_workers=4, 
             collate_fn=multi_collate, pin_memory=True, sampler=sampler, shuffle=False)
         
+        # Either distributed evaluation or single gpu evaluation
         if params.dist_eval:
             sampler = DistributedEvalSampler(test_dataset, shuffle=False)
             test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
@@ -120,7 +122,7 @@ def main(params):
 
     model = CascadeXML(params = params, train_ds = train_dataset).to(device)
 
-    if params.sparse:
+    if params.sparse:  # only for A3M and larger datasets
         runner = SparseRunner(params, train_dl, test_dl, inv_prop)
     else:
         runner = Runner(params, train_dl, test_dl, inv_prop)

@@ -28,8 +28,8 @@ class SparseRunner:
     def save_model(self, model, epoch, name):
         checkpoint = {
             'state_dict': model.state_dict(),
-            # 'sparse_optimizer': self.sparse_optimizer.state_dict(),
-            # 'dense_optimizer': self.dense_optimizer.state_dict(),
+            'sparse_optimizer': self.sparse_optimizer.state_dict(),
+            'dense_optimizer': self.dense_optimizer.state_dict(),
             'epoch': epoch,
             # 'scaler': self.scaler.state_dict()
         }
@@ -45,9 +45,9 @@ class SparseRunner:
         except RuntimeError as E:
             print(E)
 
-        # if load_opt:
-        #     self.sparse_optimizer.load_state_dict(checkpoint['sparse_optimizer'])
-        #     self.dense_optimizer.load_state_dict(checkpoint['dense_optimizer'])
+        if load_opt:
+            self.sparse_optimizer.load_state_dict(checkpoint['sparse_optimizer'])
+            self.dense_optimizer.load_state_dict(checkpoint['dense_optimizer'])
         #     self.scaler.load_state_dict(checkpoint["scaler"])
         init = checkpoint['epoch']
         return model, init
@@ -87,10 +87,7 @@ class SparseRunner:
 
     def fit_one_epoch(self, model, params, device, epoch):
         trainLoss = torch.tensor(0.0).to(device)
-        if isinstance(model,  nn.parallel.DistributedDataParallel):
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
-        else:
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+        self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
         
         # self.recall = [torch.zeros(100, dtype=np.int).to(device) for _ in range(2)]
 
@@ -123,13 +120,8 @@ class SparseRunner:
             all_probs, all_candidates, loss = model(x_batch, attention_mask, epoch, labels)
             loss.backward()
             
-            # if not params.distributed:
+            # grad accumulate may cause CUDA OOM, unpredictable
             if (step + 1) % 1 == 0:
-                # self.scaler.unscale_(self.optimizer)
-                # nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-                # self.scaler.step(self.sparse_optimizer)
-                # self.scaler.step(self.dense_optimizer)
                 self.sparse_optimizer.step()
                 self.dense_optimizer.step()
                 # self.scaler.update()
@@ -195,9 +187,10 @@ class SparseRunner:
 
         no_decay = ['bias', 'LayerNorm.weight']
         
-        #ADDED
-        module.Cn[-1].to('cuda:1')
-        # module.Cn_bias[-1].to('cuda:1')
+        # Dual GPU only, DDP doesn't work with sparse
+        if torch.cuda.device_count() > 1:
+            module.Cn[-1].to('cuda:1')
+            # module.Cn_bias[-1].to('cuda:1')
 
         wd = params.weight_decay 
         optimizer_grouped_parameters = [
@@ -207,19 +200,19 @@ class SparseRunner:
             {'params': [p for n, p in module.Cn_hidden.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': lr*10}
         ]
         
-        # sparse_opt_groups = [
-        #     {'params': [p for n, p in module.Cn.named_parameters()], 'weight_decay': wd/10, 'lr': lr*10},
-        #     {'params': [p for n, p in module.Cn_bias.named_parameters()], 'weight_decay': 0.0, 'lr': lr*10}
-        # ]
         sparse_opt_groups = [
-            {'params': [p for n, p in module.Cn.named_parameters()], 'lr': lr*10},
-            {'params': [p for n, p in module.Cn_bias.named_parameters()], 'lr': lr*10}
+            {'params': [p for n, p in module.Cn.named_parameters()], 'weight_decay': wd/10, 'lr': lr*10},
+            {'params': [p for n, p in module.Cn_bias.named_parameters()], 'weight_decay': 0.0, 'lr': lr*10}
         ]
+        # sparse_opt_groups = [
+        #     {'params': [p for n, p in module.Cn.named_parameters()], 'lr': lr*10},
+        #     {'params': [p for n, p in module.Cn_bias.named_parameters()], 'lr': lr*10}
+        # ]
         
-        self.scaler = GradScaler()
+        # self.scaler = GradScaler()
         self.dense_optimizer = AdamW(optimizer_grouped_parameters, lr = lr)
-        # self.sparse_optimizer = SparseAdam(sparse_opt_groups, lr=lr)
-        self.sparse_optimizer = torch.optim.SGD(sparse_opt_groups, lr=lr, momentum=0.9)
+        self.sparse_optimizer = SparseAdam(sparse_opt_groups, lr=lr)
+        # self.sparse_optimizer = torch.optim.SGD(sparse_opt_groups, lr=lr, momentum=0.9)
         
         init = 0
         last_batch = -1
