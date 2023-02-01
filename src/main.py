@@ -68,7 +68,7 @@ def main(params):
             f"[{os.getpid()}] rank = {dist.get_rank()} ({params.rank}), "
             + f"world_size = {dist.get_world_size()}, n = {n}, device_ids = {device_ids}"
         )
-
+        device = torch.device("cuda", params.local_rank)
         # params.seed = params.local_rank + params.seed
     else:
         params.local_rank = 0
@@ -120,7 +120,7 @@ def main(params):
         test_dl = DataLoader(test_dataset, batch_size=params.batch_size, num_workers=4, 
                                     shuffle=False, collate_fn=multi_collate, pin_memory=True)
 
-    model = CascadeXML(params = params, train_ds = train_dataset).to(device)
+    model = CascadeXML(params = params, train_ds = train_dataset, device = device).to(device)
 
     if params.sparse:  # only for A3M and larger datasets
         runner = SparseRunner(params, train_dl, test_dl, inv_prop)

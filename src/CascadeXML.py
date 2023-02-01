@@ -45,7 +45,7 @@ def feat_maker(recipe, bert_outs):
     
 
 class CascadeXML(nn.Module):
-    def __init__(self, params, train_ds):
+    def __init__(self, params, train_ds, device):
         super(CascadeXML, self).__init__()
 
         self.loss_fn = torch.nn.BCEWithLogitsLoss()
@@ -54,6 +54,7 @@ class CascadeXML(nn.Module):
         assert isinstance(self.candidates_topk, list), "topK should be a list with at least 2 integers"
         self.rw_loss = params.rw_loss
         self.return_shortlist = params.return_shortlist
+        self.device = device
 
         clusters = train_ds.groups 
         max_cluster = max([len(c) for c in clusters[-1]])
@@ -64,7 +65,7 @@ class CascadeXML(nn.Module):
                                         constant_values=self.num_ele[-1]).astype(np.int32)
 
         clusters = [np.stack(c) for c in clusters]
-        self.clusters = [torch.LongTensor(c).cuda() for c in clusters]
+        self.clusters = [torch.LongTensor(c).to(device) for c in clusters]
 
         num_meta_labels = [c.shape[0] for c in self.clusters]
         
@@ -127,8 +128,8 @@ class CascadeXML(nn.Module):
             TF_scores += group_gd
         scores, indices = torch.topk(TF_scores, k=self.candidates_topk[level - 1])
         if self.is_training:
-            scores = group_scores[torch.arange(group_scores.shape[0]).view(-1,1).cuda(), indices]
-        indices = prev_cands[torch.arange(indices.shape[0]).view(-1,1).cuda(), indices]
+            scores = group_scores[torch.arange(group_scores.shape[0]).view(-1,1).to(self.device), indices]
+        indices = prev_cands[torch.arange(indices.shape[0]).view(-1,1).to(self.device), indices]
         candidates = self.clusters[level - 1][indices] 
         candidates_scores = torch.ones_like(candidates) * scores[...,None] 
 
@@ -137,7 +138,7 @@ class CascadeXML(nn.Module):
     def forward(self, input_ids, attention_mask, epoch=None, all_labels = None, return_out=False):
         self.is_training = all_labels is not None
         
-        token_type_ids = torch.zeros_like(attention_mask).cuda()
+        token_type_ids = torch.zeros_like(attention_mask).to(self.device)
         bert_outs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)[-1]
 
         if return_out:
