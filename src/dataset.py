@@ -11,7 +11,6 @@ from xclib.utils.sparse import retain_topk
 from xclib.utils.graph import normalize_graph
 from random_walks import PrunedWalk
 import scipy.sparse as sp
-from make_r import make_r
 
 def get_tokenizer(model_name):
     if 'roberta' in model_name:
@@ -29,7 +28,7 @@ def get_tokenizer(model_name):
 class InferenceDataset():
     'Not an actual dataset, just a container for clusters'
     def __init__(self, params):
-        tree = Tree(b_factors=params.b_factors, method=params.cluster_method, 
+        tree = Tree(b_factors=params.tree_depth, method=params.cluster_method, 
                             leaf_size=params.num_labels, force_shallow=True)
         self.build(tree, params)
 
@@ -79,11 +78,9 @@ class MultiXMLGeneral(Dataset):
         self.sep_token_id = [102]  # [self.tokenizer.sep_token_id]
 
         self.label_graph = self.load_graph(params)
-        self.tree = Tree(b_factors=params.b_factors, method=params.cluster_method, 
+        self.tree = Tree(b_factors=params.tree_depth, method=params.cluster_method, 
                             leaf_size=params.num_labels, force_shallow=True)
         self.build(params)
-        # if self.mode == 'train' and params.use_r:
-        #     self.rs = make_r(self.groups, Y)
         self.groups.append(np.arange(self.n_labels).reshape(-1, 1))
         
         if self.groups is not None:
@@ -199,12 +196,6 @@ class MultiXMLGeneral(Dataset):
             cluster_ids.append(torch.LongTensor(np.unique(map[cluster_ids[-1]])))
             assert cluster_ids[-1][0] != -1
         
-        # if hasattr(self, 'rs'):
-        #     rs = []
-        #     for r in self.rs:
-        #         rs.append((r[idx].data.astype(np.float32), r[idx].indices.astype(np.int64)))
-        #     cluster_ids = cluster_ids[::-1] + rs
-        # else:
         cluster_ids = cluster_ids[::-1]
 
         if self.train_W:
@@ -216,246 +207,8 @@ class MultiXMLGeneral(Dataset):
             input_ids = input_ids[:self.max_len-2]
         input_ids = self.cls_token_id + input_ids + self.sep_token_id
 
-        # if len(input_ids) > self.max_len-1:
-        #     input_ids = input_ids[:self.max_len-1]
-        # input_ids = self.cls_token_id + input_ids
-
         padding_length = self.max_len - len(input_ids)
         attention_mask = torch.tensor([1] * len(input_ids) + [0] * padding_length)
         input_ids = torch.tensor(input_ids + ([0] * padding_length))
 
         return input_ids, attention_mask, *cluster_ids
-
-
-
-def word_pool(words, tfidfs, out_shape):
-    assert out_shape <= words.shape[0]
-    bs = words.shape[0]
-    
-    chunks = torch.tensor_split(torch.arange(words.shape[0]), out_shape, dim=0)
-    new_words = [(words[:, c] * tfidf[:, c].reshape(bs, -1, 1)).sum(1) for c in chunks]
-
-    return torch.stack(new_words, dim=1)  # b, out_shape, 300
-
-class PoolableMultiXMLGeneral(MultiXMLGeneral):
-    def __init__(self, x, Y, params, X_tfidf = None, mode='train', bert_tfidf=None):
-        super().__init__(x, Y, params, X_tfidf, mode)
-        if mode=='train':
-            self.bert_tfidf = sp.load_npz('data/Wiki10-31K/bert-base/bert_unnorm_tfidf_train.npz')
-        else:
-            self.bert_tfidf = sp.load_npz('data/Wiki10-31K/bert-base/bert_unnorm_tfidf_test.npz')
-        print('using word pooling')
-        # self.bert_tfidf[0] = 0
-        # self.bert_tfidf[self.cls_token_id[0]] = 1/8
-        # self.bert_tfidf[self.sep_token_id[0]] = 1/8
-
-    def word_pool(self, words, tfidfs, bin_size=8):
-        if len(words) > 8 * (self.max_len-2):
-            words = words[:8*(self.max_len-2)]
-        words = np.array(words)
-        if self.max_len-2 <= words.shape[0]:
-            chunks = np.array_split(np.arange(words.shape[0]), self.max_len-2)
-            new_words = [words[c] for c in chunks]
-            new_words = [np.concatenate([nw, np.zeros((bin_size - nw.shape[0]))]) for nw in new_words]
-
-            new_tfidfs = [tfidfs[nw.astype(int)] for nw in new_words]
-
-            new_words = [np.array(bin_size*self.cls_token_id)] + new_words + [np.array(bin_size*self.sep_token_id)]
-            new_tfidfs = [np.array(bin_size*[1/bin_size])] + new_tfidfs + [np.array(bin_size*[1/bin_size])]
-
-            attention_mask = torch.tensor([1] * self.max_len)
-
-            return torch.from_numpy(np.stack([np.stack(new_words), np.stack(new_tfidfs)])), attention_mask
-        else:
-            new_words = [np.concatenate([nw.reshape(1), np.zeros((bin_size - 1))]) for nw in words]
-            new_tfidfs = [tfidfs[nw.astype(int)] for nw in new_words]
-            
-            new_words = [np.array(bin_size*self.cls_token_id)] + new_words + [np.array(bin_size*self.sep_token_id)]
-            new_tfidfs = [np.array(bin_size*[1/bin_size])] + new_tfidfs + [np.array(bin_size*[1/bin_size])]
-
-            attention_mask = torch.tensor([1] * len(new_words) + [0] * (self.max_len - len(new_words)))
-            new_words = new_words + [np.zeros(bin_size)] * (self.max_len - len(new_words))
-            new_tfidfs = new_tfidfs + [np.zeros(bin_size)] * (self.max_len - len(new_tfidfs))
-
-            return torch.from_numpy(np.stack([np.stack(new_words), np.stack(new_tfidfs)])), attention_mask
-
-    
-    def __getitem__(self, idx):
-        cluster_ids = [torch.LongTensor(self.Y[idx].indices)]
-        for map in self.label_to_cluster_maps:
-            cluster_ids.append(torch.LongTensor(np.unique(map[cluster_ids[-1]])))
-            assert cluster_ids[-1][0] != -1
-            # if cluster_ids[-1][0] == -1:
-            #     cluster_ids[-1] = cluster_ids[-1][1:]
-        if hasattr(self, 'rs'):
-            rs = []
-            for r in self.rs:
-                rs.append((r[idx].data.astype(np.float32), r[idx].indices.astype(np.int64)))
-            cluster_ids = cluster_ids[::-1] + rs
-        else:
-            cluster_ids = cluster_ids[::-1]
-
-        if self.train_W:
-            return torch.FloatTensor(self.x[idx]), torch.ones(128), *cluster_ids[::-1]
-
-        input_ids = self.x[idx]
-        tfidfs = np.array(self.bert_tfidf[idx].todense())[0] #[input_ids]
-
-        # if len(input_ids) > 8 * (self.max_len-2):
-        #     input_ids = input_ids[:8*(self.max_len-2)]
-        # if len(input_ids) % 8 != 0:
-        #     input_ids = input_ids + [0] * (8  - len(input_ids)%8)
-        
-        # input_ids = self.cls_token_id * 8 + input_ids + self.sep_token_id * 8
-        # padding_length = 8 * self.max_len - len(input_ids)
-        # attention_mask = torch.tensor([1] * (len(input_ids)//8) + [0] * (padding_length//8))
-        
-        # input_ids = torch.tensor(input_ids + ([0] * padding_length))
-        # input_ids = input_ids.reshape(-1, 8)
-        # tfidfs = torch.from_numpy(tfidfs.reshape(-1, 8))
-
-        # input_ids = torch.stack([input_ids, tfidfs], dim=0)  # 2, 256, 8
-
-        input_ids, attention_mask = self.word_pool(input_ids, tfidfs, 8)
-
-        return input_ids, attention_mask, *cluster_ids
-        
-
-class PecosDataset(Dataset):
-    def __init__(self, x, y, num_labels, max_length, groups=None, 
-                 cluster_levels=[12, 15], model_name = 'bert-base', mode='train', alpha=1e-2):
-        super().__init__()
-        assert mode in ["train", "test"]
-        self.mode = mode
-        self.x = x
-        self.y = list(list(map(int, l)) for l in y)
-        y_indices = [(i, int(j)) for i in range(len(y)) for j in y[i]]
-        y_rows, y_cols = zip(*y_indices)
-        sparse_y = csr_matrix((np.ones(len(y_rows)), (y_rows, y_cols)), shape=[len(y), num_labels])
-        self.n_labels = num_labels
-        # self.tokenizer = get_tokenizer(model_name)
-        self.max_len = max_length
-        # self.label_to_cluster_ids = None
-        self.label_space = torch.zeros(self.n_labels)
-        self.cls_token_id = [101] #[self.tokenizer.cls_token_id]
-        self.sep_token_id = [102] #[self.tokenizer.sep_token_id]
-
-        # self.groups = groups.copy()  # list
-        self.num_clusters = []
-        # self.groups.append(np.arange(self.n_labels).reshape(-1, 1))
-        # import pdb; pdb.set_trace()
-
-        if groups is not None:
-            self.label_to_cluster_maps = []
-            self.rs = []
-            self.alpha=alpha
-            self.groups = []
-            self.cluster_levels = cluster_levels
-
-            assert len(groups)-1 >= self.cluster_levels[-1]
-            group_mat = None
-            r_mat = sparse_y
-            for idx in range(len(groups)-1, -1 ,-1):
-                if group_mat is None:
-                    group_mat = groups[idx].T
-                else:
-                    group_mat = groups[idx].T @ group_mat
-                r_mat = r_mat @ groups[idx]
-                
-                if group_mat.shape[0] == 2**self.cluster_levels[-1]:
-                    group_mat_tlil = group_mat.copy().T.tolil().rows
-                    self.label_to_cluster_maps.append(np.array([g[0] for g in group_mat_tlil]))
-                    group_mat_lil = group_mat.copy().tolil().rows
-                    self.groups.append([list(g) for g in group_mat_lil])
-                    r_mat_curr = r_mat.copy()
-                    r_mat_curr = normalize(r_mat_curr, norm='l1', axis=1)
-                    self.rs.append(r_mat_curr)
-                    self.num_clusters.append(r_mat_curr.shape[-1])
-                    self.cluster_levels.pop(-1)
-                    if len(self.cluster_levels) == 0:
-                        break
-                    group_mat = None
-                # import pdb; pdb.set_trace()
-            # self.label_to_cluster_maps = self.label_to_cluster_maps
-            # self.rs = self.rs
-            self.groups = self.groups[::-1]
-            # import pdb; pdb.set_trace()
-            
-    def __len__(self):
-        return len(self.x)
-
-    def __getitem__(self, idx):
-        cluster_ids = [torch.LongTensor(self.y[idx])]
-        input_ids = self.x[idx]
-
-        if len(input_ids) > self.max_len-2:
-            input_ids = input_ids[:self.max_len-2]
-        
-        input_ids = self.cls_token_id + input_ids + self.sep_token_id
-        padding_length = self.max_len - len(input_ids)
-        attention_mask = torch.tensor([1] * len(input_ids) + [0] * padding_length)
-        input_ids = torch.tensor(input_ids + ([0] * padding_length))
-
-        for lmap in self.label_to_cluster_maps:
-            cluster_ids.append(torch.LongTensor(np.unique(lmap[cluster_ids[-1]])))
-            if cluster_ids[-1][0] == -1:
-                cluster_ids[-1] == cluster_ids[-1][1:]
-
-        return input_ids, attention_mask, *cluster_ids[::-1]
-
-class XMLData(Dataset):
-    def __init__(self, x, y, num_labels, max_length, params, group_y=None, 
-                    model_name = 'bert-base', mode='train'):
-        super(XMLData).__init__()
-        assert mode in ["train", "test"]
-        self.mode = mode
-        self.x = x
-        self.y = du.read_sparse_file('/scratch/project_2001083/siddhant/Datasets/LF-AmazonTitles-131K/trn_X_Y.txt')
-        self.tf_X = du.read_sparse_file('/scratch/project_2001083/siddhant/Datasets/LF-AmazonTitles-131K/trn_X_Xf.txt')
-        self.n_labels = num_labels
-        # self.tokenizer = get_tokenizer(model_name)
-        self.max_len = max_length
-        self.label_to_cluster_ids = None
-        self.label_space = torch.zeros(self.n_labels)
-        self.cls_token_id = [101] #[self.tokenizer.cls_token_id]
-        self.sep_token_id = [102] #[self.tokenizer.sep_token_id]
-
-        if group_y is not None:
-            # group y mode
-            self.num_clusters = len(group_y)
-            self.cluster_space = torch.zeros(self.num_clusters)
-            self.label_to_cluster_ids = np.zeros(self.n_labels, dtype=np.int64) - 1
-            for idx, labels in enumerate(group_y):
-                self.label_to_cluster_ids[[int(l) for l in labels]] = idx
-            
-    def __len__(self):
-        return len(self.x)
-        
-    def __getitem__(self, idx):
-        labels = torch.LongTensor(self.y[idx].indices)
-        input_ids = self.x[idx]
-
-        # if len(input_ids) > self.max_len-2:
-        #     input_ids = input_ids[:self.max_len-2]
-        if len(input_ids) > self.max_len-1:
-            input_ids = input_ids[:self.max_len-1]
-        input_ids = self.cls_token_id + input_ids
-        
-        # input_ids = self.cls_token_id + input_ids + self.sep_token_id
-        padding_length = self.max_len - len(input_ids)
-        attention_mask = torch.tensor([1] * len(input_ids) + [0] * padding_length)
-        input_ids = torch.tensor(input_ids + ([0] * padding_length))
-        if self.label_to_cluster_ids is not None and self.mode == 'train':
-            cluster_ids = np.unique(self.label_to_cluster_ids[labels])
-            if cluster_ids[0] == -1:
-                cluster_ids = cluster_ids[1:]
-            cluster_binarized = self.cluster_space.scatter(0, torch.tensor(cluster_ids), 1.0)
-        
-        if self.label_to_cluster_ids is not None:
-            if self.mode=='train':            
-                return input_ids, attention_mask, labels, cluster_binarized
-            else:
-                return input_ids, attention_mask, labels
-        else:
-            return input_ids, attention_mask, labels
-

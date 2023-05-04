@@ -12,34 +12,6 @@ from multiprocessing import Pool, cpu_count
 from tqdm.contrib.concurrent import process_map
 # from xclib.data import data_utils as du
 
-cachedStopWords = stopwords.words("english")
-
-def clean_str(string):
-    string = string.replace('\n', ' ')
-    string = re.sub(r"_", " ", string)
-    string = re.sub("\[\d+\]", "", string)
-    string = re.sub(r"[^A-Za-z0-9!?\.\'\`]", " ", string)
-    # string = ' '.join([word for word in string.split() if word not in cachedStopWords])
-    # string = re.sub('(?<=[A-Za-z]),', ' ', string)
-    # string = re.sub(r"(),!?", " ", string)
-    # string = re.sub(r"[^A-Za-z0-9!?\.\'\`]", " ", string)
-    # string = re.sub('(?<=[A-Za-z])\.', '', string)
-    # string = re.sub(r'([\d]+)([A-Za-z]+)', '\g<1> \g<2>', string)
-    # string = re.sub(r"\'s ", " ", string)
-    # string = re.sub(r"s\' ", " ", string)
-    string = re.sub(r"\s{2,}", " ", string)
-    string = string.strip().lower()
-    return string
-
-
-def get_fast_tokenizer(self):
-    if 'roberta' in self.bert_name:
-        tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base', do_lower_case=True)
-    elif 'xlnet' in self.bert_name:
-        tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased') 
-    else:
-        tokenizer = BertWordPieceTokenizer("data/.bert-base-uncased-vocab.txt", lowercase=True)
-    return tokenizer
 
 def get_tokenizer(model_name):
     if 'roberta' in model_name:
@@ -74,27 +46,6 @@ def get_inv_prop(dataset, Y):
     
     np.save(os.path.join(dataset, 'inv_prop.npy'), inv_prop)
     return inv_prop
-
-def load_short_data(data_path):
-
-    trn_data, tst_data, lbl_data = [], [], []
-    with open(os.path.join(data_path, 'trn.json')) as fin:
-        for info in tqdm(fin.readlines(), desc='Reading training data'):
-            info = json.loads(info)
-            trn_data.append(info['title'])
-
-    with open(os.path.join(data_path, 'tst.json'), 'r') as fin:
-        for info in tqdm(fin.readlines(), desc='Reading testing data'):
-            info = json.loads(info)
-            tst_data.append(info['title'])
-
-    
-    with open(os.path.join(data_path, 'lbl.json'), 'r') as fin:
-        for info in tqdm(fin.readlines(), desc='Reading label data'):
-            info = json.loads(info)
-            lbl_data.append(info['title'])
-
-    return trn_data, tst_data, lbl_data
 
 def make_csr_tfidf(dataset):
     file_name = f'{dataset}/tfidf.npz'
@@ -192,29 +143,16 @@ def load_data(dataset, model, num_labels, load_precomputed):
     
     print(f"Loading data for {dataset}")
 
-    assert any([x in model for x in ['roberta', 'bert', 'xlnet']]), f'Tokenizer for {model} not implemented. Add it src/data_utils.py and rerun'
+    assert any([x in model for x in ['roberta', 'bert', 'xlnet']]), f'Tokenizer for {model} not implemented. Add it in src/data_utils.py and rerun'
 
     if not os.path.exists(f'{dataset}/{model}/train_encoded.pkl'):
         create_data(dataset, model)
     
     with open(f'{dataset}/{model}/train_encoded.pkl', 'rb') as f:
         train_texts = pkl.load(f)
-    
-    # if dataset == './data/Wiki-500K':
-    #     print("truncating train texts")
-    #     for i, text in enumerate(train_texts):
-    #          train_texts[i] = text[:128]
 
     with open(f'{dataset}/{model}/test_encoded.pkl', 'rb') as f:
         test_texts = pkl.load(f)
-
-    # with open(f'{dataset}/{model}/lbl_encoded.pkl', 'rb') as f:
-    #     lbl_texts = pkl.load(f)
-
-    # if dataset == './data/Wiki-500K':
-    #     print("truncating test texts")
-    #    	for i, text in enumerate(test_texts):
-    #    	     test_texts[i] = text[:128]
     
     train_labels = make_csr_labels(num_labels, f'{dataset}/Y.trn.npz')
     test_labels = make_csr_labels(num_labels, f'{dataset}/Y.tst.npz')
@@ -222,22 +160,3 @@ def load_data(dataset, model, num_labels, load_precomputed):
     inv_prop = get_inv_prop(dataset, train_labels)
 
     return train_texts, test_texts, train_labels, test_labels, tfidf, inv_prop
-
-def load_group(dataset, num_clusters):
-    if dataset == 'wiki500k':
-        return np.load(f'Wiki-500K/label_group_{num_clusters}.npy', allow_pickle=True)
-    if dataset == 'Amazon-670K':
-        return np.load(f'Amazon-670K/label_group_{num_clusters}.npy', allow_pickle=True) 
-        # return np.load(f'Amazon-670K/label_group_tree-Level-1.npy', allow_pickle=True)
-    if dataset == 'AT670':
-        # return np.load(f'AmazonTitles-670K/label_group_{num_clusters}.npy', allow_pickle=True)
-        return np.load(f'AmazonTitles-670K/label_group8192.npy', allow_pickle=True)
-    if dataset == 'WSAT':
-        return np.load(f'WikiSeeAlsoTitles-350K/label_group_{num_clusters}.npy', allow_pickle=True)  
-    if dataset == 'LF-AmazonTitles-131K':
-        return np.load(f'../Datasets/{dataset}/label_group_0.npy', allow_pickle=True)            
-
-def load_cluster_tree(dataset, levels=2):
-    if dataset == 'Amazon-670K':
-        return [np.load(f'./data/Amazon-670K/label_group_tree-Level-{i}.npy', allow_pickle=True) for i in range(levels)]
-        # return [np.load(f'Amazon-670K/label_group_stable-Level-{i}.npy', allow_pickle=True) for i in [1, 2]]

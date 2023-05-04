@@ -90,10 +90,6 @@ def main(params):
 
     X_train, X_test, Y_train, Y_test, X_tfidf, inv_prop = load_data(params.data_path, params.bert, params.num_labels, params.train_W)
     
-    # clusters = load_cluster_tree(params.dataset) if params.dataset in ['wiki500k', 'Amazon-670K'] else None
-    # train_dataset = MultiXMLData(X_train, Y_train, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='train')
-    # test_dataset = MultiXMLData(X_test, Y_test, params.num_labels, params.max_len, clusters, model_name = params.bert, mode='test')
-    
     train_dataset = MultiXMLGeneral(X_train, Y_train, params, X_tfidf, mode='train')
     test_dataset = MultiXMLGeneral(X_test, Y_test, params, mode='test')
 
@@ -153,14 +149,10 @@ if __name__ == '__main__':
     parser.add_argument('--bert', type=str, required=False, default='bert-base')
     parser.add_argument('--max_len', type=int, required=False, default=128)
 
-    parser.add_argument('--swa', action='store_true')
-    parser.add_argument('--swa_warmup', type=int, required=False, default=30)
-    parser.add_argument('--swa_step', type=int, required=False, default=3000)
-    parser.add_argument('--swa_update_step', type=int, required=False, default=3000)
-
     parser.add_argument('--topk', required=False, type=int, default=10, nargs='+')
     parser.add_argument('--freeze_layer_count', type=int, default=6)
 
+    # DDP settings (remove later)
     parser.add_argument('--distributed', action='store_true', help='distributed training')
     parser.add_argument('--local_rank', type=int, help='node rank for distributed training', default=None)
     parser.add_argument('--local_world_size', type=int, default=2,
@@ -179,13 +171,12 @@ if __name__ == '__main__':
     parser.add_argument('--return_shortlist', action='store_true')
     parser.add_argument('--train_W', action='store_true')
     parser.add_argument('--gradient_checkpointing', action='store_true')
-    parser.add_argument('--rw_loss', type=int, nargs='+', default=[1, 1, 1, 1])
 
     parser.add_argument('--ensemble_files', nargs='+', default=[], type=str)
 
     #Parabel Cluster params
     parser.add_argument('--cluster_name', default='clusters_eclare_4.pkl')
-    parser.add_argument('--b_factors', type=int, nargs='+', default=[10, 13, 16])
+    parser.add_argument('--tree_depth', type=int, nargs='+', default=[10, 13, 16])  #b_factor
     parser.add_argument('--cluster_method', default='AugParabel')
     parser.add_argument('--verbose_lbs', type=int, default=0)
 
@@ -195,9 +186,6 @@ if __name__ == '__main__':
     parser.add_argument('--p_reset', type=float, default=0.8)
     parser.add_argument('--walk_len', type=int, default=400)
     parser.add_argument('--top_k', type=int, default=10)
-
-    parser.add_argument('--use_r', action='store_true')
-    parser.add_argument('--word_pool', action='store_true')
 
     params = parser.parse_args()
     main(params)

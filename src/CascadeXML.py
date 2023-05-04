@@ -52,7 +52,6 @@ class CascadeXML(nn.Module):
         self.candidates_topk = params.topk
         self.candidates_topk = self.candidates_topk.split(',') if isinstance(self.candidates_topk, str) else self.candidates_topk
         assert isinstance(self.candidates_topk, list), "topK should be a list with at least 2 integers"
-        self.rw_loss = params.rw_loss
         self.return_shortlist = params.return_shortlist
         self.device = device
 
@@ -214,7 +213,7 @@ class CascadeXML(nn.Module):
         if self.is_training:
             sum_loss = 0.
             for i, l in enumerate(all_losses):
-                sum_loss += l * self.rw_loss[i]
+                sum_loss += l
             return all_probs, all_candidates, sum_loss
         else:
             return all_probs, all_candidates, all_probs_weighted

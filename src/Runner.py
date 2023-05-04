@@ -244,7 +244,10 @@ class Runner:
             x_batch, attention_mask, labels = sample[0].to(device), sample[1].to(device), sample[2]
 
             with torch.cuda.amp.autocast():
-                all_probs, all_candidates, all_probs_weighted = model(x_batch, attention_mask, epoch)
+                if isinstance(model,  nn.parallel.DistributedDataParallel) and not params.dist_eval:
+                    all_probs, all_candidates, all_probs_weighted = model.module(x_batch, attention_mask, epoch)    
+                else:
+                    all_probs, all_candidates, all_probs_weighted = model(x_batch, attention_mask, epoch)
 
             # all_recall = [torch.topk(probs, 512)[1].cpu() for probs in all_probs]
             all_preds = [torch.topk(probs, self.top_k)[1].cpu() for probs in all_probs]
@@ -321,7 +324,6 @@ class Runner:
                 self.best_test_acc = score
                 self.save_model(model, epoch, params.model_name + "/model_best_test.pth")
 
-    # @staticmethod
     def test_ensemble(self, params):
         
         self.counts = [torch.zeros(self.top_k, dtype=np.int)]
