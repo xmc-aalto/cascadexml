@@ -130,8 +130,6 @@ def _sdist(XA, XB, norm=None):
 
 
 def _merge_tree(cluster, verbose_label_index, first_split = -1, avg_size=0, force=False):
-    # height = np.log2(len(cluster))
-    # if cluster[0].size < verbose_label_index[0].size or height == first_split:
     if cluster[0].size < verbose_label_index[0].size:
         print("Merging trees", np.log2(len(cluster)))
         return cluster + verbose_label_index, [np.asarray([])]
@@ -149,25 +147,6 @@ def _merge_tree(cluster, verbose_label_index, first_split = -1, avg_size=0, forc
 def cluster_labels(labels, clusters, verbose_label_index, num_nodes, splitter, first_split = -1):
     start = time.time()
     clusters, verbose_label_index = _merge_tree(clusters, verbose_label_index, first_split)
-    # while len(clusters) < num_nodes:
-    #     if isinstance(labels, list):
-    #         temp_cluster_list = functools.reduce(
-    #         operator.iconcat,
-    #         map(lambda x: splitter(labels[0][x], labels[1][x], x), clusters), [])
-    #     else:    
-    #         temp_cluster_list = functools.reduce(
-    #             operator.iconcat,
-    #             map(lambda x: splitter(labels[x], x), clusters), [])
-    #     end = time.time()
-    #     print("Total clusters {}".format(len(temp_cluster_list)),
-    #           "Avg. Cluster size {}".format(
-    #         np.mean(list(map(len, temp_cluster_list+verbose_label_index)))),
-    #         "Total time {} sec".format(end-start))
-    #     clusters = temp_cluster_list
-    #     clusters, verbose_label_index = _merge_tree(
-    #         clusters, verbose_label_index)
-    #     del temp_cluster_list
-    # print(cpu_count()-1)
     with Pool(cpu_count()-1) as p:
         while len(clusters) < num_nodes:
             if isinstance(labels, list):
@@ -217,11 +196,9 @@ class hash_map_index:
 
 
 class build_tree:
-    def __init__(self, b_factors=[2], M=1, method='random',
-                 leaf_size=0, force_shallow=True):
+    def __init__(self, b_factors=[2], M=1, leaf_size=0, force_shallow=True):
         self.b_factors = b_factors
         self.C = []
-        self.method = method
         self.leaf_size = leaf_size
         self.force_shallow = force_shallow
         self.height = 2
@@ -250,14 +227,6 @@ class build_tree:
             lbl_repr = lbl_repr.tocsr()
             b_kmeans = b_kmeans_sparse
             self.num_labels = lbl_repr.shape[0]
-
-        if self.method == "NoCluster":
-            self.height = 1
-            print("No need to create splits")
-            n_lb = self.num_labels
-            self.hash_map_array.append(hash_map_index(
-                None, np.concatenate(clusters), n_lb, n_lb, n_lb))
-            return
 
         self._parabel(lbl_repr, clusters, [verbose_label_index],
                       b_kmeans, self.force_shallow)
@@ -299,24 +268,6 @@ class build_tree:
             if depth == len(self.b_factors):
                 print("Preparing Leaf")
                 break
-
-        # self.height = depth+1
-        # self.max_node_idx = np.int(n_child_nodes*self.C[-1])
-        # print("Building tree at height %d with max leafs: %d" %
-        #       (self.height, self.max_node_idx))
-        # _labels_path_array = np.full((self.max_node_idx), self.num_labels, dtype=np.int)
-
-        # for idx, c in enumerate(clusters):
-        #     index = np.arange(c.size) + idx*self.C[-1]
-        #     _labels_path_array[index] = clusters[idx]
-        # self.hash_map_array.append(
-        #     hash_map_index(None,
-        #                    _labels_path_array,
-        #                    self.max_node_idx,
-        #                    self.num_labels,
-        #                    self.num_labels))
-        # print("Sparsity of leaf is %0.2f" %
-        #       ((1-(self.num_labels/self.max_node_idx))*100))
 
     def _get_cluster_depth(self, depth):
         return self.hash_map_array[depth].clusters

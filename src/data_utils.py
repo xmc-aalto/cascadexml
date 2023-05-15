@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import pickle as pkl
 import numpy as np
@@ -32,8 +33,8 @@ def get_inv_prop(dataset, Y):
 
     print("Creating inv_prop file")
     
-    A = {'Eurlex': 0.6, 'Amazon-670K': 0.6, 'Amazon-3M': 0.6, 'AmazonCat-13K': 0.55, 'Wiki-500K' : 0.5, 'Wiki10-31K' : 0.55}
-    B = {'Eurlex': 2.6, 'Amazon-670K': 2.6, 'Amazon-3M': 2.6, 'AmazonCat-13K': 1.5, 'Wiki-500K': 0.4, 'Wiki10-31K': 1.5}
+    A = {'Eurlex': 0.6, 'LF-Amazon-131K': 0.6, 'Amazon-670K': 0.6, 'Amazon-3M': 0.6, 'AmazonCat-13K': 0.55, 'Wiki-500K' : 0.5, 'Wiki10-31K' : 0.55}
+    B = {'Eurlex': 2.6, 'LF-Amazon-131K': 2.6, 'Amazon-670K': 2.6, 'Amazon-3M': 2.6, 'AmazonCat-13K': 1.5, 'Wiki-500K': 0.4, 'Wiki10-31K': 1.5}
 
     d = dataset.split('/')[-1]
     a, b = A[d], B[d]
@@ -47,14 +48,17 @@ def get_inv_prop(dataset, Y):
     np.save(os.path.join(dataset, 'inv_prop.npy'), inv_prop)
     return inv_prop
 
-def make_csr_tfidf(dataset):
+def make_csr_tfidf(dataset, LF_data):
     file_name = f'{dataset}/tfidf.npz'
     if os.path.exists(file_name):
+        print(f"Loading {file_name}")
         tfidf_mat = sp.load_npz(file_name)
     else:
         with open(f'{dataset}/train.txt') as fil:
+            if LF_data:
+                data = fil.readlines()[1:]
             row_idx, col_idx, val_idx = [], [], []
-            for i, data in enumerate(fil.readlines()):
+            for i, data in enumerate(data):
                 data = data.split()[1:]
                 for tfidf in data:
                     try:
@@ -68,24 +72,32 @@ def make_csr_tfidf(dataset):
             m = max(row_idx) + 1
             n = max(col_idx) + 1
             tfidf_mat = sp.csr_matrix((val_idx, (row_idx, col_idx)), shape=(m, n))
+            print(f"Created {file_name}")
             sp.save_npz(file_name, tfidf_mat)
     return tfidf_mat
 
-def make_csr_labels(num_labels, file_name):
+def make_csr_labels(num_labels, file_name, LF_data):
     if os.path.exists(file_name):
+        print(f"Loading {file_name}")
         Y = sp.load_npz(file_name)
     else:
         with open(os.path.splitext(file_name)[0]+'.txt') as fil:
-            row_idx, col_idx, val_idx = [], [], []
+            if LF_data:
+                data = fil.readlines()[1:] 
+            row_idx, col_idx = [], []
             for i, lab in enumerate(fil.readlines()):
-                l_list = lab.replace('\n', '').split()
-                for y in l_list:
-                    row_idx.append(i)
-                    col_idx.append(int(y))
-                    val_idx.append(1)
+                if LF_data:
+                    l_list = [int(l) for l in lab.split()[0].split(',')]
+                else:
+                    l_list = [int(l) for l in lab.replace('\n', '').split()]
+                col_idx.extend(l_list)
+                row_idx.extend([i]*len(l_list))
+
             m = max(row_idx) + 1
             n = num_labels
+            val_idx = [1]*len(row_idx)
             Y = sp.csr_matrix((val_idx, (row_idx, col_idx)), shape=(m, n))
+            print(f"Created {file_name}")
             sp.save_npz(file_name, Y)
     return Y
 
@@ -94,17 +106,38 @@ def encode(text):
 
 # tokenizer = get_tokenizer(model)
 
-def create_data(dataset, model):
-    print(f"Creating new data for {model} model")
-    tokenizer = get_tokenizer(model)
-    global sp_token 
-    sp_token = tokenizer
+def read_lf_datasets(dataset):
 
-    # train_texts, test_texts, lbl_texts = load_short_data(dataset)
     train_texts, test_texts = [], []
+
+    with open(f'{dataset}/trn.json') as f:
+        for point in tqdm(f.readlines()):
+            point = point.replace('\n', ' ')
+            point = point.replace('\t', ' ')
+            point = json.loads(point)
+            point = point['title'] + ' [SEP] ' + point['content']
+            point = point.replace('_', ' ')
+            point = re.sub(r"\s{2,}", " ", point)
+            train_texts.append(point)
+
+    with open(f'{dataset}/tst.json') as f:
+        for point in tqdm(f.readlines()):
+            point = point.replace('\n', ' ')
+            point = point.replace('\t', ' ')
+            point = json.loads(point)
+            point = point['title'] + ' [SEP] ' + point['content']
+            point = point.replace('_', ' ')
+            point = re.sub(r"\s{2,}", " ", point)
+            test_texts.append(point)
+
+    return train_texts, test_texts
+
+def read_dataset(dataset):
+    
+    train_texts, test_texts = [], []
+
     with open(f'{dataset}/train_raw_texts.txt') as f:
         for point in tqdm(f.readlines()):
-            # train_texts.append(clean_str(point))
             point = point.replace('\n', ' ')
             point = point.replace('_', ' ')
             point = re.sub(r"\s{2,}", " ", point)
@@ -113,13 +146,24 @@ def create_data(dataset, model):
 
     with open(f'{dataset}/test_raw_texts.txt') as f:
         for point in tqdm(f.readlines()):
-            # test_texts.append(clean_str(point))
-            # test_texts.append(point.replace('\n', ''))
             point = point.replace('\n', ' ')
             point = point.replace('_', ' ')
             point = re.sub(r"\s{2,}", " ", point)
             point = re.sub("/SEP/", "[SEP]", point)
             test_texts.append(point)
+
+    return train_texts, test_texts
+
+def create_data(dataset, model, LF_data=False):
+    print(f"Creating new data for {model} model")
+    tokenizer = get_tokenizer(model)
+    global sp_token 
+    sp_token = tokenizer
+
+    if LF_data:
+        train_texts, test_texts = read_lf_dataset(dataset)
+    else:
+        train_texts, test_texts = read_dataset(dataset)
     
     print(f"Available CPU Count is: {cpu_count()}")
 
@@ -137,7 +181,7 @@ def create_data(dataset, model):
     with open(f'{dataset}/{model}/test_encoded.pkl','wb') as f:
         pkl.dump(encoded_test, f)
 
-def load_data(dataset, model, num_labels, load_precomputed): 
+def load_data(dataset, model, num_labels, LF_data): 
     train_labels, test_labels = [], []
     train_texts, test_texts = [], []
     
@@ -146,7 +190,7 @@ def load_data(dataset, model, num_labels, load_precomputed):
     assert any([x in model for x in ['roberta', 'bert', 'xlnet']]), f'Tokenizer for {model} not implemented. Add it in src/data_utils.py and rerun'
 
     if not os.path.exists(f'{dataset}/{model}/train_encoded.pkl'):
-        create_data(dataset, model)
+        create_data(dataset, model, LF_data)
     
     with open(f'{dataset}/{model}/train_encoded.pkl', 'rb') as f:
         train_texts = pkl.load(f)
@@ -154,9 +198,9 @@ def load_data(dataset, model, num_labels, load_precomputed):
     with open(f'{dataset}/{model}/test_encoded.pkl', 'rb') as f:
         test_texts = pkl.load(f)
     
-    train_labels = make_csr_labels(num_labels, f'{dataset}/Y.trn.npz')
-    test_labels = make_csr_labels(num_labels, f'{dataset}/Y.tst.npz')
-    tfidf = make_csr_tfidf(dataset)
+    train_labels = make_csr_labels(num_labels, f'{dataset}/Y.trn.npz', LF_data) #Write train.npz for LF datasets
+    test_labels = make_csr_labels(num_labels, f'{dataset}/Y.tst.npz', LF_data) #Write test.npz for LF datasets
+    tfidf = make_csr_tfidf(dataset, LF_data)
     inv_prop = get_inv_prop(dataset, train_labels)
 
     return train_texts, test_texts, train_labels, test_labels, tfidf, inv_prop

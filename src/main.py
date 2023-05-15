@@ -15,9 +15,7 @@ from Runner_sparse import SparseRunner
 # from Runner_accelerate import Runner
 from dist_eval_sampler import DistributedEvalSampler
 
-NUM_LABELS = {'Amazon-670K': 670091, 'Amazon-3M': 2812281, 'Wiki-500K' : 501070, 'AmazonCat-13K': 13330, 'Wiki10-31K': 30938, 'Eurlex': 3993, 'AT670': 670091, 'WT500': 501070, 'WSAT350': 352072}
-NUM_CLUSTERS = {'Amazon-670K': 8192, 'Amazon-3M': 131072, 'Wiki-500K' : 65536, 'AmazonCat-13K': 128, 'Wiki10-31K': 256, 'Eurlex': 64, 'AT670': 8192, 'WT500':8192, 'WSAT350': 8192}
-EVAL_SCHEME = {'Amazon-670K': 'weighted', 'Amazon-3M': 'weighted', 'Wiki-500K' : 'level', 'AmazonCat-13K': 'level', 'Wiki10-31K': 'weighted'}
+EVAL_SCHEME = {'LF-Amzon-131K': 'weighted', 'Amazon-670K': 'weighted', 'Amazon-3M': 'weighted', 'Wiki-500K' : 'level', 'AmazonCat-13K': 'level', 'Wiki10-31K': 'weighted'}
 
 def get_exp_name():
     name = [params.dataset, params.mn, '' if 'bert-base' in params.bert else params.bert]
@@ -75,20 +73,16 @@ def main(params):
         device = torch.device('cuda:0')
 
     init_seed(params.seed)
-    params.num_labels = NUM_LABELS[params.dataset]
-    params.num_clusters = NUM_CLUSTERS[params.dataset]
+
     params.model_name = get_exp_name()
     if params.local_rank == 0:
         print(get_exp_name())
         os.makedirs(params.model_name, exist_ok=True)
         print(f'load {params.dataset} dataset...')
-    
-    if len(params.load_model):
-        params.load_model = os.path.join(params.model_name, params.load_model)
 
     params.data_path = os.path.join('./data/', params.dataset)
 
-    X_train, X_test, Y_train, Y_test, X_tfidf, inv_prop = load_data(params.data_path, params.bert, params.num_labels, params.train_W)
+    X_train, X_test, Y_train, Y_test, X_tfidf, inv_prop = load_data(params.data_path, params.bert, params.num_labels, params.LF_data)
     
     train_dataset = MultiXMLGeneral(X_train, Y_train, params, X_tfidf, mode='train')
     test_dataset = MultiXMLGeneral(X_test, Y_test, params, mode='test')
@@ -135,21 +129,22 @@ def main(params):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, required=False, default=16)
-    parser.add_argument('--update_count', type=int, required=False, default=4)
-    parser.add_argument('--lr', type=float, required=False, default=1e-4)
-    parser.add_argument('--seed', type=int, required=False, default=29)
+    parser.add_argument('--num_labels', type=int, required=True, default=670091)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--update_count', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--seed', type=int, default=29)
 
     parser.add_argument('--mn', type=str, required=True)
     parser.add_argument('--lm', dest='load_model', type=str, default="", help='model to load')
     parser.add_argument('--test', action='store_true', help='Testing mode or training mode')
 
-    parser.add_argument('--num_epochs', type=int, required=False, default=15)
-    parser.add_argument('--dataset', type=str, required=False, default='Amazon-670K')
-    parser.add_argument('--bert', type=str, required=False, default='bert-base')
-    parser.add_argument('--max_len', type=int, required=False, default=128)
+    parser.add_argument('--num_epochs', type=int, default=15)
+    parser.add_argument('--dataset', type=str, default='Amazon-670K')
+    parser.add_argument('--bert', type=str, default='bert-base')
+    parser.add_argument('--max_len', type=int, default=128)
 
-    parser.add_argument('--topk', required=False, type=int, default=10, nargs='+')
+    parser.add_argument('--topk', type=int, default=10, nargs='+')
     parser.add_argument('--freeze_layer_count', type=int, default=6)
 
     # DDP settings (remove later)
@@ -162,22 +157,19 @@ if __name__ == '__main__':
     parser.add_argument('--warmup', type=int, default=1)
     parser.add_argument('--embed_drops', type=float, default=[0.2, 0.25, 0.4, 0.5], nargs='+')
     parser.add_argument('--weight_decay', type=float, default=0.05)
-    parser.add_argument('--use_multi_cls', action='store_true')
 
-    parser.add_argument('--eval_scheme', type=str, choices=['weighted, level'], default='weighted')
+    parser.add_argument('--eval_scheme', type=str, choices=['weighted', 'level'], default='weighted')
     parser.add_argument('--sparse', action='store_true')
-    parser.add_argument('--no_space', action='store_true')
     parser.add_argument('--return_embeddings', action='store_true')
     parser.add_argument('--return_shortlist', action='store_true')
-    parser.add_argument('--train_W', action='store_true')
-    parser.add_argument('--gradient_checkpointing', action='store_true')
+    parser.add_argument('--rw_loss', type=int, nargs='+', default=[1, 1, 1, 1])
 
+    parser.add_argument('--LF_data', action='store_true')
     parser.add_argument('--ensemble_files', nargs='+', default=[], type=str)
 
     #Parabel Cluster params
     parser.add_argument('--cluster_name', default='clusters_eclare_4.pkl')
     parser.add_argument('--tree_depth', type=int, nargs='+', default=[10, 13, 16])  #b_factor
-    parser.add_argument('--cluster_method', default='AugParabel')
     parser.add_argument('--verbose_lbs', type=int, default=0)
 
     #Graph params

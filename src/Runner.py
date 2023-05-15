@@ -19,6 +19,8 @@ class Runner:
         self.top_k = top_k
         self.update_count = params.update_count
         self.inv_prop = torch.from_numpy(inv_prop).double()
+        if hasattr(test_dl.dataset, 'filter_test'):
+            self.filter_test = test_dl.dataset.filter_test
 
     def save_model(self, model, epoch, name):
         checkpoint = {
@@ -80,7 +82,6 @@ class Runner:
 
         self.optimizer.zero_grad()
 
-        # print(f'\nStarting Epoch: {epoch} : {params.local_rank}\n')
         if params.local_rank==0:
             print(f'\nStarting Epoch: {epoch}\n')
             pbar = tqdm(self.train_dl, desc=f"Epoch {epoch}")
@@ -95,16 +96,7 @@ class Runner:
                 all_probs, all_candidates, loss = model(x_batch, attention_mask, epoch, labels)
             self.scaler.scale(loss).backward()
 
-            if not params.distributed:
-                if (step + 1) % self.update_count == 0:
-                    # self.scaler.unscale_(self.optimizer)
-                    # nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad()
-                    self.cycle_scheduler.step()
-            else:
+            if not params.distributed or ((step + 1) % self.update_count == 0):
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
@@ -125,7 +117,6 @@ class Runner:
             
         print(f"Train time : {time.time() - st} seconds")
         if params.distributed:
-            # dist.barrier()
             dist.reduce(trainLoss, dst=0, op=dist.ReduceOp.SUM)
             for c in self.counts:
                 dist.reduce(c, dst=0, op=dist.ReduceOp.SUM)
@@ -144,9 +135,6 @@ class Runner:
             dist.barrier()
 
         self.test(model, params, device, epoch)
-        # if params.distributed:
-        #     dist.barrier()
-        #     print(f'released from barrier {params.local_rank}')
 
     def train(self, model, params, device):
         # test only on one process
@@ -164,10 +152,10 @@ class Runner:
                 find_unused_parameters=True
             )
             module = model.module
-            steps_per_epoch = len(self.train_dl)+1
+            steps_per_epoch = len(self.train_dl)
         else:
             module = model
-            steps_per_epoch = len(self.train_dl)//4+1    
+            steps_per_epoch = len(self.train_dl)//self.update_count + 1    
 
         no_decay = ['bias', 'LayerNorm.weight']
         wd = params.weight_decay 
@@ -183,14 +171,14 @@ class Runner:
         self.scaler = GradScaler()
         self.optimizer = AdamW(optimizer_grouped_parameters, lr = lr)
         
-        init = 0
-        last_batch = -1
+        init, last_batch = 0, -1
         
         if len(params.load_model):
+            params.load_model = os.path.join(params.model_name, params.load_model)
             print("Loading model from ", params.load_model)
             load_opt = not (params.return_embeddings or params.test)
             model, init = self.load_model(model, params.load_model, load_opt)
-            last_batch = init*(len(self.train_dl)//4)
+            last_batch = init*(steps_per_epoch-1)
         
         if params.return_embeddings:
             self.return_embeddings(model, params)
@@ -215,6 +203,7 @@ class Runner:
             if params.distributed:
                 self.train_dl.sampler.set_epoch(epoch)
             self.fit_one_epoch(model, params, device, epoch+1)
+
 
     @torch.no_grad()
     def test(self, model, params, device, epoch=0):
@@ -249,6 +238,19 @@ class Runner:
                 else:
                     all_probs, all_candidates, all_probs_weighted = model(x_batch, attention_mask, epoch)
 
+            if hasattr(self, 'filter_test'): # Filtering LF test labels
+                logits = torch.zeros((all_candidates[-1].shape[0], params.num_labels+1)).cuda()
+                logits_w = torch.zeros((all_candidates[-1].shape[0], params.num_labels+1)).cuda()
+                logits[torch.repeat_interleave(torch.arange(all_candidates[-1].shape[0]), all_candidates[-1].shape[1]), torch.flatten(all_candidates[-1])] = torch.flatten(all_probs[-1])
+                logits_w[torch.repeat_interleave(torch.arange(all_candidates[-1].shape[0]), all_candidates[-1].shape[1]), torch.flatten(all_candidates[-1])] = torch.flatten(all_probs_weighted[-1])
+                
+                filter_idx = torch.where((self.filter_test[:, 0] < (step+1)*params.batch_size) & (self.filter_test[:, 0] >= step*params.batch_size))[0]
+                logits[self.filter_test[filter_idx, 0] - step*params.batch_size, self.filter_test[filter_idx, 1]] = 0.
+                logits_w[self.filter_test[filter_idx, 0] - step*params.batch_size, self.filter_test[filter_idx, 1]] = 0.
+
+                all_probs[-1] = logits[np.arange(all_candidates[-1].shape[0]).reshape(-1,1), all_candidates[-1]]
+                all_probs_weighted[-1] = logits_w[np.arange(all_candidates[-1].shape[0]).reshape(-1,1), all_candidates[-1]]
+            
             # all_recall = [torch.topk(probs, 512)[1].cpu() for probs in all_probs]
             all_preds = [torch.topk(probs, self.top_k)[1].cpu() for probs in all_probs]
             all_weighted_preds = [torch.topk(probs, self.top_k)[1].cpu() for probs in all_probs_weighted]
@@ -306,6 +308,7 @@ class Runner:
                 print(f'Level-{i} Test Scores: P@1: {precs[i][0]:.2f}, P@3: {precs[i][2]:.2f}, P@5: {precs[i][4]:.2f}')
                 if i != 0:
                     print(f'Level-{i} Weighted Test Scores: P@1: {weighted_precs[i][0]:.2f}, P@3: {weighted_precs[i][2]:.2f}, P@5: {weighted_precs[i][4]:.2f}')
+                print("----------------------------------------")
             print(f"Level-{i} Weighted PSP Score: PSP@1: {psp[0]:.2f}, PSP@3: {psp[2]:.2f}, PSP@5: {psp[4]:.2f}")
             
             idx = torch.concat(idx, dim=0)
@@ -340,11 +343,10 @@ class Runner:
                     for i, scores in enumerate(predictions):
                         scores = scores.replace('\n', '').split()
                         labels = [int(x.split(':')[0]) for x in scores]
-                        lab_scores = torch.tensor([float(x.split(':')[1]) for x in scores]).sigmoid()
-                        for l, s in zip(labels, lab_scores):
-                            row_idx.append(i)
-                            col_idx.append(l)
-                            val_idx.append(s)
+                        lab_scores = list(torch.tensor([float(x.split(':')[1]) for x in scores]).sigmoid())
+                        col_idx.extend(labels)
+                        val_idx.extend(lab_scores)
+                        row_idx.extend([i]*len(labels))
                     m = max(row_idx) + 1
                     n = params.num_labels
                     Y = sp.csr_matrix((val_idx, (row_idx, col_idx)), shape=(m, n))
@@ -380,16 +382,16 @@ class Runner:
 
         print(f'\nCreating learnt feature embeddings')
         
-        # pbar = tqdm(self.test_dl, desc=f"Creating test data embeddings")
+        pbar = tqdm(self.test_dl, desc=f"Creating test data embeddings")
         
-        # for step, sample in enumerate(pbar): 
-        #     x_batch, attention_mask = sample[0].cuda(), sample[1].cuda()
-        #     with torch.cuda.amp.autocast():
-        #         bert_feats = model(x_batch, attention_mask, 0, return_out=True)
-        #     test_feats.append(bert_feats)
+        for step, sample in enumerate(pbar): 
+            x_batch, attention_mask = sample[0].cuda(), sample[1].cuda()
+            with torch.cuda.amp.autocast():
+                bert_feats = model(x_batch, attention_mask, 0, return_out=True)
+            test_feats.append(bert_feats)
         
-        # test_feats = torch.cat(test_feats, dim=0).numpy()
-        # np.save(f'./{params.dataset}_{params.bert}_tst_{params.seed}.npy', test_feats)
+        test_feats = torch.cat(test_feats, dim=0).numpy()
+        np.save(f'./{params.dataset}_{params.bert}_tst_s{params.seed}.npy', test_feats)
 
         pbar = tqdm(self.train_dl, desc=f"Creating train data embeddings")
         
@@ -398,23 +400,9 @@ class Runner:
             with torch.cuda.amp.autocast():
                 bert_feats = model(x_batch, attention_mask, 0, return_out=True)
             train_feats.append(bert_feats)
-            if step == 999: 
-                break
         
         train_feats = torch.cat(train_feats, dim=0).numpy()
-        np.save(f'./{params.dataset}_{params.bert}_trn_{params.seed}.npy', train_feats)
-
-        # train_feats = torch.stack(train_feats).numpy()
-        # np.save(f'./Attention_Maps_PT.npy', train_feats)
-
-        # for idx in range(13):
-        #     cls_out = []
-        #     for feat in train_feats:
-        #         cls_out.append(feat[idx])
-        #     cls_out = torch.cat(cls_out, dim=0).numpy()
-        #     np.save(f'./CLS_Tokens_{idx}_PT.npy', cls_out)
-        #     del cls_out
-        
+        np.save(f'./{params.dataset}_{params.bert}_trn_s{params.seed}.npy', train_feats)
         exit()
 
     @torch.no_grad()
@@ -437,6 +425,5 @@ class Runner:
 
         shortlist = sp.csr_matrix((value, (row_idx, col_idx)), shape=(n, m))
         shortlist = shortlist[:, :-1]
-        sp.save_npz('W10_Shortlist_ext.npz', shortlist)
-
+        sp.save_npz(f'./{params.dataset}_{params.bert}_shortlist_s{params.seed}.npz', shortlist)
         exit()

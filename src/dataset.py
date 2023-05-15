@@ -24,12 +24,10 @@ def get_tokenizer(model_name):
         tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
     return tokenizer
 
-
 class InferenceDataset():
     'Not an actual dataset, just a container for clusters'
     def __init__(self, params):
-        tree = Tree(b_factors=params.tree_depth, method=params.cluster_method, 
-                            leaf_size=params.num_labels, force_shallow=True)
+        tree = Tree(b_factors=params.tree_depth, leaf_size=params.num_labels, force_shallow=True)
         self.build(tree, params)
 
         self.groups.append(np.arange(params.num_labels).reshape(-1, 1))
@@ -65,10 +63,17 @@ class MultiXMLGeneral(Dataset):
         assert mode in ["train", "test"]
         self.mode = mode
         self.x = x
-        self.train_W = params.train_W
         self.Y = Y
+        
         if mode == 'train':
             self.tf_X = normalize(X_tfidf, norm='l2')
+            print(f"Loading clusters from {params.cluster_name}")
+
+        elif mode == 'test' and os.path.exists(os.path.join(params.data_path, 'filter_labels_test.txt')):
+            print("Loading filter_labels_test.txt")
+            filter_test = np.loadtxt(os.path.join(params.data_path, 'filter_labels_test.txt'))
+            self.filter_test = torch.from_numpy(filter_test.astype(np.int64)) 
+            
         self.n_labels = params.num_labels
         # self.tokenizer = get_tokenizer(params.bert)
         self.max_len = params.max_len
@@ -78,8 +83,7 @@ class MultiXMLGeneral(Dataset):
         self.sep_token_id = [102]  # [self.tokenizer.sep_token_id]
 
         self.label_graph = self.load_graph(params)
-        self.tree = Tree(b_factors=params.tree_depth, method=params.cluster_method, 
-                            leaf_size=params.num_labels, force_shallow=True)
+        self.tree = Tree(b_factors=params.tree_depth, leaf_size=params.num_labels, force_shallow=True)
         self.build(params)
         self.groups.append(np.arange(self.n_labels).reshape(-1, 1))
         
@@ -101,7 +105,6 @@ class MultiXMLGeneral(Dataset):
         return len(self.x)
 
     def load_graph(self, params, word_embeds=None):
-        print(os.path.join(params.data_path, params.graph_name))
         if not os.path.exists(os.path.join(
                 params.data_path, params.graph_name)):
             
@@ -140,15 +143,9 @@ class MultiXMLGeneral(Dataset):
         return graph
 
     def build(self, params, lbl_dense=None, word_embeds=None):
-        print(f"Loading clusters from {params.cluster_name}")
         cluster_name = os.path.join(params.data_path, params.cluster_name)
         if not os.path.exists(cluster_name):
             freq_y = np.ravel(self.Y.sum(axis=0))
-            
-            # _doc_repr = np.load('./doc_features_768C.npy')
-            # _doc_repr = normalize(_doc_repr)
-            # lbl_dense = normalize(self.Y.T.dot(_doc_repr))
-            
             verb_lbs, norm_lbs = np.asarray([]), np.arange(freq_y.size)
             if params.verbose_lbs > 0:
                 verb_lbs = np.where(freq_y > params.verbose_lbs)[0]
@@ -156,21 +153,20 @@ class MultiXMLGeneral(Dataset):
 
             lbl_sparse = self.create_label_fts_vec()
 
-            if params.cluster_method == 'AugParabel':
-                print("Augmenting graphs")
-                self.label_graph = self.load_graph(params, word_embeds)
-                n_gph = normalize_graph(self.label_graph)
-                
-                print("Using Sparse Features")
-                print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
-                lbl_sparse = n_gph.dot(lbl_sparse).tocsr()
-                lbl_sparse = retain_topk(lbl_sparse.tocsr(), k=1000).tocsr()
-                print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
+            print("Augmenting graphs")
+            self.label_graph = self.load_graph(params, word_embeds)
+            n_gph = normalize_graph(self.label_graph)
+            
+            print("Using Sparse Features")
+            print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
+            lbl_sparse = n_gph.dot(lbl_sparse).tocsr()
+            lbl_sparse = retain_topk(lbl_sparse.tocsr(), k=1000).tocsr()
+            print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
 
-                if lbl_dense is not None:
-                    print("Using Dense Features")
-                    lbl_dense = n_gph.dot(normalize(lbl_dense))
-                    lbl_sparse = [lbl_sparse, lbl_dense]
+            if lbl_dense is not None:
+                print("Using Dense Features")
+                lbl_dense = n_gph.dot(normalize(lbl_dense))
+                lbl_sparse = [lbl_sparse, lbl_dense]
                 
             self.tree.fit(norm_lbs, verb_lbs, lbl_sparse)
             self.tree.save(cluster_name)
@@ -197,9 +193,6 @@ class MultiXMLGeneral(Dataset):
             assert cluster_ids[-1][0] != -1
         
         cluster_ids = cluster_ids[::-1]
-
-        if self.train_W:
-            return torch.FloatTensor(self.x[idx]), torch.ones(128), *cluster_ids[::-1]
 
         input_ids = self.x[idx]
         

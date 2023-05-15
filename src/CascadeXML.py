@@ -54,6 +54,8 @@ class CascadeXML(nn.Module):
         assert isinstance(self.candidates_topk, list), "topK should be a list with at least 2 integers"
         self.return_shortlist = params.return_shortlist
         self.device = device
+        self.rw_loss = params.rw_loss
+
 
         clusters = train_ds.groups 
         max_cluster = max([len(c) for c in clusters[-1]])
@@ -72,15 +74,10 @@ class CascadeXML(nn.Module):
         
         if len(self.num_ele) == 4:
             self.layers = [(5, 6), 8, 10, 12]
-            # self.layers = [(8, 9), 10, 11, 12]
-            # self.layers = [(11, 12), 12, 12, 12]
+            # self.layers = [(8, 9), 10, 11, 12] #other option
         elif len(self.num_ele) == 3:
             self.layers = [(7, 8), 10, 12]
-            # self.layers = [(9, 10), 11, 12]
-            # self.layers = [(11, 12), 12, 12]
-
-        if params.no_space:
-            self.layers = [(9, 10), 11, 12]
+            # self.layers = [(9, 10), 11, 12] #other option
 
         embed_drops = params.embed_drops
         
@@ -213,7 +210,7 @@ class CascadeXML(nn.Module):
         if self.is_training:
             sum_loss = 0.
             for i, l in enumerate(all_losses):
-                sum_loss += l
+                sum_loss += l * self.rw_loss[i]
             return all_probs, all_candidates, sum_loss
         else:
             return all_probs, all_candidates, all_probs_weighted
