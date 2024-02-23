@@ -12,7 +12,14 @@ import tqdm
 from multiprocessing import Pool, cpu_count
 
 
+# def _normalize(X, norm='l2'):
+#     print('X:',X)
+#     X = scale(X, norm='l2')
+#     return X
+
 def _normalize(X, norm='l2'):
+    if isinstance(X, np.matrix):
+        X = np.asarray(X)
     X = scale(X, norm='l2')
     return X
 
@@ -112,7 +119,7 @@ def b_kmeans_sparse(labels_features, index, metric='cosine', tol=1e-4, leakage=N
     while cluster[0] == cluster[1]:
         cluster = np.random.randint(
             low=0, high=labels_features.shape[0], size=(2))
-    _centeroids = _normalize(labels_features[cluster].todense())
+    _centeroids = _normalize(np.asarray(labels_features[cluster].todense())) #changed
     _sim = _sdist(labels_features, _centeroids)
     old_sim, new_sim = -1000000, -2
     while new_sim - old_sim >= tol:

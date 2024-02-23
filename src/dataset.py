@@ -105,12 +105,13 @@ class MultiXMLGeneral(Dataset):
         return len(self.x)
 
     def load_graph(self, params, word_embeds=None):
+        
         if not os.path.exists(os.path.join(
                 params.data_path, params.graph_name)):
             
             trn_y = self.Y
             n_lbs = self.Y.shape[1]
-            diag = np.ones(n_lbs, dtype=np.int)
+            diag = np.ones(n_lbs, dtype=np.int64)
 
             if params.verbose_lbs > 0:
                 verbose_labels = np.where(
@@ -155,18 +156,20 @@ class MultiXMLGeneral(Dataset):
 
             print("Augmenting graphs")
             self.label_graph = self.load_graph(params, word_embeds)
-            n_gph = normalize_graph(self.label_graph)
+            n_gph = normalize_graph(self.label_graph) # catching exceptions here
             
             print("Using Sparse Features")
             print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
             lbl_sparse = n_gph.dot(lbl_sparse).tocsr()
-            lbl_sparse = retain_topk(lbl_sparse.tocsr(), k=1000).tocsr()
+            lbl_sparse = retain_topk(lbl_sparse.tocsr(), k=1000).tocsr() #changed: original:1000
             print("Avg features", lbl_sparse.nnz / lbl_sparse.shape[0])
 
             if lbl_dense is not None:
                 print("Using Dense Features")
                 lbl_dense = n_gph.dot(normalize(lbl_dense))
                 lbl_sparse = [lbl_sparse, lbl_dense]
+                
+            print('start fitting the tree...')
                 
             self.tree.fit(norm_lbs, verb_lbs, lbl_sparse)
             self.tree.save(cluster_name)

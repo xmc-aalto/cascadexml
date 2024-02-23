@@ -129,13 +129,13 @@ def main(params):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_labels', type=int, required=True, default=670091)
+    parser.add_argument('--num_labels', type=int, default=670091) #changed
     parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--update_count', type=int, default=4)
+    parser.add_argument('--update_count', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=29)
 
-    parser.add_argument('--mn', type=str, required=True)
+    parser.add_argument('--mn', type=str, default='') #changed
     parser.add_argument('--lm', dest='load_model', type=str, default="", help='model to load')
     parser.add_argument('--test', action='store_true', help='Testing mode or training mode')
 

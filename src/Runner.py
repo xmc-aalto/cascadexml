@@ -73,9 +73,9 @@ class Runner:
     def fit_one_epoch(self, model, params, device, epoch):
         trainLoss = torch.tensor(0.0).to(device)
         if isinstance(model,  nn.parallel.DistributedDataParallel):
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
+            self.counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.module.clusters)+1)]
         else:
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+            self.counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.clusters)+1)]
 
         model.train()
         len_dl = len(self.train_dl)
@@ -212,12 +212,12 @@ class Runner:
         
         model.eval()
         if isinstance(model,  nn.parallel.DistributedDataParallel):
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
-            self.weighted_counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.module.clusters)+1)]
+            self.counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.module.clusters)+1)]
+            self.weighted_counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.module.clusters)+1)]
         else:
-            self.recall = torch.zeros(len(model.clusters)+1, dtype=np.float).to(device)
-            self.counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
-            self.weighted_counts = [torch.zeros(self.top_k, dtype=np.int).to(device) for _ in range(len(model.clusters)+1)]
+            self.recall = torch.zeros(len(model.clusters)+1, dtype=torch.float).to(device)
+            self.counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.clusters)+1)]
+            self.weighted_counts = [torch.zeros(self.top_k, dtype=int).to(device) for _ in range(len(model.clusters)+1)]
         
         self.num = torch.zeros(self.top_k).cuda()
         self.den = torch.zeros(self.top_k).cuda()
@@ -329,7 +329,7 @@ class Runner:
 
     def test_ensemble(self, params):
         
-        self.counts = [torch.zeros(self.top_k, dtype=np.int)]
+        self.counts = [torch.zeros(self.top_k, dtype=int)]
         self.num = torch.zeros(self.top_k)
         self.den = torch.zeros(self.top_k)
         
