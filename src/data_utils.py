@@ -58,7 +58,7 @@ def make_csr_tfidf(dataset, LF_data):
             if LF_data:
                 data = fil.readlines()[1:]
             row_idx, col_idx, val_idx = [], [], []
-            for i, data in enumerate(data):
+            for i, data in enumerate(fil.readlines()[1:]): #changed
                 data = data.split()[1:]
                 for tfidf in data:
                     try:
@@ -89,7 +89,7 @@ def make_csr_labels(num_labels, file_name, LF_data):
                 if LF_data:
                     l_list = [int(l) for l in lab.split()[0].split(',')]
                 else:
-                    l_list = [int(l) for l in lab.replace('\n', '').split()]
+                    l_list = [int(l) for l in lab.replace('\n', '').split(',')]
                 col_idx.extend(l_list)
                 row_idx.extend([i]*len(l_list))
 
